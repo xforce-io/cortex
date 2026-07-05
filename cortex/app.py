@@ -1,0 +1,968 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import sys
+import threading
+import time
+import traceback
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from .db import connect, decode_row, dump, load
+from .mlflow_local import LocalMlflow
+from .storage import ObjectStorage
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def public_dataset(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"],
+        "type": row["type"],
+        "owner": row["owner"],
+        "team": row["team"],
+        "tags": load(row["tags"]),
+        "status": row["status"],
+        "visibility": row["visibility"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def public_version(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "datasetId": row["dataset_id"],
+        "version": row["version"],
+        "storageUri": row["storage_uri"],
+        "format": row["format"],
+        "schema": load(row["schema_json"]),
+        "rowCount": row["row_count"],
+        "sampleCount": row["sample_count"],
+        "checksum": row["checksum"],
+        "checksumStatus": row["checksum_status"],
+        "split": load(row["split_json"]),
+        "trainable": bool(row["trainable"]),
+        "approvalStatus": row["approval_status"],
+        "createdBy": row["created_by"],
+        "createdAt": row["created_at"],
+    }
+
+
+def public_job(row: dict) -> dict:
+    progress = row["progress_percent"]
+    message = row["status_message"]
+    if row["status"] == "succeeded" and progress == 0:
+        progress = 100
+        message = "Completed"
+    elif row["status"] == "failed" and progress == 0:
+        progress = 100
+        message = "Failed"
+    elif row["status"] == "canceled" and progress == 0:
+        progress = 100
+        message = "Canceled"
+    return {
+        "id": row["id"],
+        "templateId": row["template_id"],
+        "datasetVersionId": row["dataset_version_id"],
+        "experimentName": row["experiment_name"],
+        "params": load(row["params"]),
+        "status": row["status"],
+        "mlflowRunId": row["mlflow_run_id"],
+        "executorRef": row["executor_ref"],
+        "logUri": row["log_uri"],
+        "errorMessage": row["error_message"],
+        "progressPercent": progress,
+        "statusMessage": message,
+        "owner": row["owner"],
+        "team": row["team"],
+        "createdAt": row["created_at"],
+        "startedAt": row["started_at"],
+        "finishedAt": row["finished_at"],
+    }
+
+
+def public_evaluation(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "registeredModelName": row["registered_model_name"],
+        "modelVersion": row["model_version"],
+        "runId": row["run_id"],
+        "trainDatasetRef": row["train_dataset_ref"],
+        "testDatasetRef": row["test_dataset_ref"],
+        "metrics": load(row["metrics"]),
+        "status": row["status"],
+        "owner": row["owner"],
+        "team": row["team"],
+        "createdAt": row["created_at"],
+    }
+
+
+EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor"}
+
+
+class CortexApp:
+    def __init__(self, home: Path):
+        self.home = home
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.conn = connect(self.home / "cortex.sqlite3")
+        self.storage = ObjectStorage(self.home / "objects")
+        self.mlflow = LocalMlflow(self.conn, self.home / "mlruns")
+        (self.home / "jobs").mkdir(exist_ok=True)
+
+    @classmethod
+    def open(cls, home: str | Path | None = None) -> "CortexApp":
+        resolved = Path(home or os.environ.get("CORTEX_HOME", ".cortex")).expanduser().resolve()
+        return cls(resolved)
+
+    def create_dataset(
+        self,
+        name: str,
+        dataset_type: str,
+        owner: str,
+        team: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        visibility: str = "team",
+    ) -> dict:
+        dataset_id = "ds_" + "".join(c if c.isalnum() else "_" for c in name.lower()).strip("_")
+        existing = self.conn.execute("SELECT id FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        if existing:
+            dataset_id = f"{dataset_id}_{uuid4().hex[:6]}"
+        ts = now()
+        self.conn.execute(
+            """
+            INSERT INTO datasets(id, name, description, type, owner, team, tags, visibility, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dataset_id, name, description, dataset_type, owner, team, dump(tags or []), visibility, ts, ts),
+        )
+        self.audit(owner, team, "dataset.create", "dataset", dataset_id, {"name": name})
+        self.conn.commit()
+        return self.get_dataset(dataset_id)
+
+    def get_dataset(self, dataset_id: str) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone())
+        if not row:
+            raise ValueError("DATASET_NOT_FOUND")
+        return public_dataset(row)
+
+    def list_datasets(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM datasets ORDER BY created_at DESC").fetchall()
+        datasets = []
+        for row in rows:
+            dataset = public_dataset(decode_row(row))
+            versions = self.list_dataset_versions(dataset["id"])
+            dataset["versionCount"] = len(versions)
+            dataset["latestVersion"] = versions[0]["version"] if versions else ""
+            datasets.append(dataset)
+        return datasets
+
+    def add_dataset_version(
+        self,
+        dataset_id: str,
+        version: str,
+        storage_uri: str,
+        data_format: str,
+        checksum: str | None = None,
+        schema: dict | None = None,
+        split: dict | None = None,
+        created_by: str = "unknown",
+    ) -> dict:
+        dataset = self.get_dataset(dataset_id)
+        if not self.storage.exists(storage_uri):
+            raise ValueError("STORAGE_OBJECT_NOT_FOUND")
+        actual_checksum = self.storage.checksum(storage_uri, data_format)
+        if checksum and checksum != actual_checksum:
+            raise ValueError("CHECKSUM_MISMATCH")
+        version_id = f"dv_{uuid4().hex[:12]}"
+        self.conn.execute(
+            """
+            INSERT INTO dataset_versions(
+              id, dataset_id, version, storage_uri, format, schema_json, checksum,
+              checksum_status, split_json, trainable, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified', ?, 1, ?, ?)
+            """,
+            (version_id, dataset_id, version, storage_uri, data_format, dump(schema or {}), actual_checksum, dump(split or {}), created_by, now()),
+        )
+        self.audit(created_by, dataset["team"], "dataset.version.add", "dataset_version", version_id, {"datasetId": dataset_id, "version": version})
+        self.conn.commit()
+        return self.get_dataset_version(dataset_id, version)
+
+    def get_dataset_version(self, dataset_id: str, version: str) -> dict:
+        row = decode_row(
+            self.conn.execute(
+                "SELECT * FROM dataset_versions WHERE dataset_id = ? AND version = ?",
+                (dataset_id, version),
+            ).fetchone()
+        )
+        if not row:
+            raise ValueError("DATASET_VERSION_NOT_FOUND")
+        return public_version(row)
+
+    def list_dataset_versions(self, dataset_id: str) -> list[dict]:
+        self.get_dataset(dataset_id)
+        rows = self.conn.execute("SELECT * FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC", (dataset_id,)).fetchall()
+        return [public_version(decode_row(row)) for row in rows]
+
+    def parse_dataset_ref(self, dataset_ref: str) -> dict:
+        if "@" not in dataset_ref:
+            raise ValueError("DATASET_REF_INVALID")
+        dataset_id, version = dataset_ref.split("@", 1)
+        return self.get_dataset_version(dataset_id, version)
+
+    def list_templates(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM training_templates WHERE enabled = 1 ORDER BY id").fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "modelType": row["model_type"],
+                "datasetTypes": load(row["dataset_types"]),
+                "paramSchema": load(row["param_schema"]),
+                "executorStatus": "available" if row["id"] in EXECUTABLE_TEMPLATES else "not_implemented",
+                "enabled": bool(row["enabled"]),
+            }
+            for row in rows
+        ]
+
+    def submit_training_job(
+        self,
+        template_id: str,
+        dataset_ref: str,
+        experiment_name: str,
+        params: dict,
+        owner: str,
+        team: str,
+        wait: bool = False,
+    ) -> dict:
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team)
+        self._run_job(job["id"])
+        return self.get_training_job(job["id"])
+
+    def start_training_job(
+        self,
+        template_id: str,
+        dataset_ref: str,
+        experiment_name: str,
+        params: dict,
+        owner: str,
+        team: str,
+    ) -> dict:
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team)
+        threading.Thread(target=self._run_job_in_background, args=(job["id"],), daemon=True).start()
+        print(f"training job accepted id={job['id']} template={template_id} dataset={dataset_ref}", file=sys.stderr, flush=True)
+        return job
+
+    def _run_job_in_background(self, job_id: str) -> None:
+        CortexApp.open(self.home)._run_job(job_id)
+
+    def create_training_job(
+        self,
+        template_id: str,
+        dataset_ref: str,
+        experiment_name: str,
+        params: dict,
+        owner: str,
+        team: str,
+    ) -> dict:
+        template = self.conn.execute("SELECT * FROM training_templates WHERE id = ? AND enabled = 1", (template_id,)).fetchone()
+        if not template:
+            raise ValueError("TEMPLATE_NOT_FOUND")
+        version = self.parse_dataset_ref(dataset_ref)
+        if not version["trainable"] or version["checksumStatus"] != "verified":
+            raise ValueError("DATASET_NOT_TRAINABLE")
+        dataset = self.get_dataset(version["datasetId"])
+        if dataset["type"] not in load(template["dataset_types"]):
+            raise ValueError("TEMPLATE_DATASET_TYPE_MISMATCH")
+        job_id = f"job_{uuid4().hex[:12]}"
+        tags = {
+            "platform.jobId": job_id,
+            "model_type": template["model_type"],
+            "dataset_version": dataset_ref,
+            "dataset_checksum": version["checksum"],
+            "task_type": self._task_type(template_id),
+            "owner": owner,
+            "team": team,
+        }
+        run_id = self.mlflow.create_run(experiment_name, tags)
+        log_path = self.home / "jobs" / job_id / "stdout.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = now()
+        self.conn.execute(
+            """
+            INSERT INTO training_jobs(
+              id, template_id, dataset_version_id, experiment_name, params, status,
+              mlflow_run_id, log_uri, owner, team, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            """,
+            (job_id, template_id, version["id"], experiment_name, dump(params), run_id, str(log_path), owner, team, ts),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO dataset_run_links(id, dataset_version_id, job_id, mlflow_run_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (f"link_{uuid4().hex[:12]}", version["id"], job_id, run_id, now()),
+        )
+        self.audit(owner, team, "training.job.submit", "training_job", job_id, {"templateId": template_id, "datasetRef": dataset_ref})
+        self.conn.commit()
+        return self.get_training_job(job_id)
+
+    def _run_job(self, job_id: str) -> None:
+        job = self.get_training_job(job_id)
+        print(f"training job started id={job_id} template={job['templateId']} run={job['mlflowRunId']}", file=sys.stderr, flush=True)
+        self.conn.execute(
+            "UPDATE training_jobs SET status = 'running', progress_percent = 5, status_message = ?, started_at = ?, executor_ref = ? WHERE id = ?",
+            ("Starting executor", now(), f"local:{os.getpid()}", job_id),
+        )
+        self.conn.commit()
+        log_path = Path(job["logUri"])
+        try:
+            version_row = decode_row(self.conn.execute("SELECT * FROM dataset_versions WHERE id = ?", (job["datasetVersionId"],)).fetchone())
+            version = public_version(version_row)
+            if self.storage.checksum(version["storageUri"], version["format"]) != version["checksum"]:
+                raise ValueError("CHECKSUM_MISMATCH")
+            metrics = self._execute_template(job, version, log_path)
+            dataset_ref = f"{version['datasetId']}@{version['version']}"
+            self.mlflow.update_run(
+                job["mlflowRunId"],
+                params=job["params"],
+                metrics=metrics,
+                inputs=[{"name": dataset_ref, "source": version["storageUri"], "digest": version["checksum"], "context": "training"}],
+                status="FINISHED",
+            )
+            self._update_job_progress(job_id, 100, "Completed")
+            self.conn.execute("UPDATE training_jobs SET status = 'succeeded', finished_at = ? WHERE id = ?", (now(), job_id))
+            print(f"training job succeeded id={job_id} metrics={json.dumps(metrics, sort_keys=True)}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            previous_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+            log_path.write_text(previous_log + "\n" + traceback.format_exc(), encoding="utf-8")
+            self.mlflow.update_run(job["mlflowRunId"], status="FAILED")
+            self.conn.execute(
+                "UPDATE training_jobs SET status = 'failed', progress_percent = 100, status_message = ?, error_message = ?, finished_at = ? WHERE id = ?",
+                ("Failed", str(exc), now(), job_id),
+            )
+            print(f"training job failed id={job_id} error={exc}", file=sys.stderr, flush=True)
+        self.conn.commit()
+
+    def _execute_template(self, job: dict, version: dict, log_path: Path) -> dict:
+        def progress(percent: int, message: str) -> None:
+            self._update_job_progress(job["id"], percent, message)
+
+        progress(10, "Reading dataset")
+        rows = self._read_csv_numeric(version["storageUri"])
+        if not rows:
+            raise ValueError("DATASET_EMPTY")
+        numeric_cols = [key for key in rows[0] if isinstance(rows[0][key], (int, float))]
+        if not numeric_cols:
+            raise ValueError("NO_NUMERIC_COLUMNS")
+        progress(25, f"Prepared {len(rows)} rows")
+        values = [[float(row[col]) for col in numeric_cols] for row in rows]
+        model_payload = {"templateId": job["templateId"], "params": job["params"], "numericColumns": numeric_cols}
+        if job["templateId"] == "sklearn-kmeans":
+            k = int(job["params"].get("n_clusters", 2))
+            min_duration = float(version.get("split", {}).get("minTrainingSeconds", job["params"].get("_min_duration_seconds", 0)) or 0)
+            centers, inertia = self._simple_kmeans(values, k, progress, min_duration)
+            model_payload["modelKind"] = "kmeans"
+            model_payload["centers"] = centers
+            metrics = {"inertia": round(inertia, 6), "rows": len(values)}
+        elif job["templateId"] == "sklearn-regressor":
+            target = str(job["params"].get("target", "")).strip()
+            if not target:
+                raise ValueError("TARGET_REQUIRED")
+            if target not in rows[0]:
+                raise ValueError("TARGET_COLUMN_NOT_FOUND")
+            if target not in numeric_cols:
+                raise ValueError("TARGET_MUST_BE_NUMERIC")
+            feature_cols = [col for col in numeric_cols if col != target]
+            if not feature_cols:
+                raise ValueError("NO_NUMERIC_FEATURE_COLUMNS")
+            progress(45, "Fitting linear regressor")
+            coefficients, intercept = self._fit_linear_regression([[float(row[col]) for col in feature_cols] for row in rows], [float(row[target]) for row in rows])
+            predictions = [intercept + sum(coefficients[i] * float(row[col]) for i, col in enumerate(feature_cols)) for row in rows]
+            metrics = self._regression_metrics([float(row[target]) for row in rows], predictions)
+            metrics["rows"] = len(rows)
+            model_payload.update(
+                {
+                    "modelKind": "linear_regression",
+                    "target": target,
+                    "featureColumns": feature_cols,
+                    "coefficients": coefficients,
+                    "intercept": intercept,
+                }
+            )
+            progress(90, "Computed regression metrics")
+        else:
+            raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
+        model_file = self.home / "jobs" / job["id"] / "model.json"
+        model_payload["metrics"] = metrics
+        model_file.write_text(json.dumps(model_payload), encoding="utf-8")
+        self.mlflow.log_artifact(job["mlflowRunId"], model_file, "model/model.json")
+        log_path.write_text(f"job {job['id']} completed\nmetrics={json.dumps(metrics, sort_keys=True)}\n", encoding="utf-8")
+        return metrics
+
+    def _update_job_progress(self, job_id: str, percent: int, message: str) -> None:
+        self.conn.execute(
+            "UPDATE training_jobs SET progress_percent = ?, status_message = ? WHERE id = ?",
+            (max(0, min(100, int(percent))), message, job_id),
+        )
+        self.conn.commit()
+
+    def _read_csv_numeric(self, storage_uri: str) -> list[dict]:
+        path = self.storage.path_for(storage_uri)
+        rows = []
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                parsed = {}
+                for key, value in row.items():
+                    try:
+                        parsed[key] = float(value)
+                    except (TypeError, ValueError):
+                        parsed[key] = value
+                rows.append(parsed)
+        return rows
+
+    def _simple_kmeans(self, values: list[list[float]], k: int, progress=None, min_duration: float = 0) -> tuple[list[list[float]], float]:
+        started = time.monotonic()
+        k = max(1, min(k, len(values)))
+        centers = [values[i][:] for i in range(k)]
+        iterations = 8
+        for iteration in range(iterations):
+            clusters = [[] for _ in range(k)]
+            for item in values:
+                idx = min(range(k), key=lambda i: sum((item[j] - centers[i][j]) ** 2 for j in range(len(item))))
+                clusters[idx].append(item)
+            for i, cluster in enumerate(clusters):
+                if cluster:
+                    centers[i] = [sum(row[j] for row in cluster) / len(cluster) for j in range(len(cluster[0]))]
+            if min_duration:
+                target_elapsed = min_duration * ((iteration + 1) / iterations)
+                remaining = target_elapsed - (time.monotonic() - started)
+                if remaining > 0:
+                    time.sleep(remaining)
+            if progress:
+                progress(30 + int(((iteration + 1) / iterations) * 60), f"KMeans iteration {iteration + 1}/{iterations}")
+        return centers, self._inertia(values, centers)
+
+    def _inertia(self, values: list[list[float]], centers: list[list[float]]) -> float:
+        return sum(min(sum((item[j] - center[j]) ** 2 for j in range(len(item))) for center in centers) for item in values)
+
+    def _fit_linear_regression(self, features: list[list[float]], targets: list[float]) -> tuple[list[float], float]:
+        rows = [[1.0] + row for row in features]
+        size = len(rows[0])
+        xtx = [[sum(row[i] * row[j] for row in rows) for j in range(size)] for i in range(size)]
+        xty = [sum(row[i] * target for row, target in zip(rows, targets)) for i in range(size)]
+        for i in range(size):
+            xtx[i][i] += 1e-8
+        beta = self._solve_linear_system(xtx, xty)
+        return [round(value, 8) for value in beta[1:]], round(beta[0], 8)
+
+    def _solve_linear_system(self, matrix: list[list[float]], vector: list[float]) -> list[float]:
+        size = len(vector)
+        augmented = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+        for col in range(size):
+            pivot = max(range(col, size), key=lambda row: abs(augmented[row][col]))
+            if abs(augmented[pivot][col]) < 1e-12:
+                raise ValueError("REGRESSION_MATRIX_SINGULAR")
+            augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+            divisor = augmented[col][col]
+            augmented[col] = [value / divisor for value in augmented[col]]
+            for row in range(size):
+                if row == col:
+                    continue
+                factor = augmented[row][col]
+                augmented[row] = [augmented[row][i] - factor * augmented[col][i] for i in range(size + 1)]
+        return [augmented[i][-1] for i in range(size)]
+
+    def _regression_metrics(self, targets: list[float], predictions: list[float]) -> dict:
+        errors = [prediction - target for prediction, target in zip(predictions, targets)]
+        mae = sum(abs(error) for error in errors) / len(errors)
+        mse = sum(error * error for error in errors) / len(errors)
+        mean_target = sum(targets) / len(targets)
+        total = sum((target - mean_target) ** 2 for target in targets)
+        residual = sum(error * error for error in errors)
+        r2 = 1 - residual / total if total else 1.0
+        return {"mae": round(mae, 6), "rmse": round(mse**0.5, 6), "r2": round(r2, 6)}
+
+    def _task_type(self, template_id: str) -> str:
+        if "kmeans" in template_id:
+            return "clustering"
+        if "classifier" in template_id:
+            return "classification"
+        if "regressor" in template_id:
+            return "regression"
+        return "training"
+
+    def get_training_job(self, job_id: str) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM training_jobs WHERE id = ?", (job_id,)).fetchone())
+        if not row:
+            raise ValueError("JOB_NOT_FOUND")
+        return public_job(row)
+
+    def list_training_jobs(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM training_jobs ORDER BY created_at DESC").fetchall()
+        return [public_job(decode_row(row)) for row in rows]
+
+    def get_job_logs(self, job_id: str) -> str:
+        path = Path(self.get_training_job(job_id)["logUri"])
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def cancel_training_job(self, job_id: str, operator: str = "unknown") -> dict:
+        job = self.get_training_job(job_id)
+        if job["status"] not in {"pending", "running"}:
+            raise ValueError("JOB_NOT_CANCELABLE")
+        self.conn.execute(
+            "UPDATE training_jobs SET status = 'canceled', error_message = ?, finished_at = ? WHERE id = ?",
+            ("canceled by operator", now(), job_id),
+        )
+        self.mlflow.update_run(job["mlflowRunId"], status="KILLED")
+        self.audit(operator, job["team"], "training.job.cancel", "training_job", job_id, {})
+        self.conn.commit()
+        return self.get_training_job(job_id)
+
+    def retry_training_job(self, job_id: str, wait: bool = False) -> dict:
+        job = self.get_training_job(job_id)
+        version_row = decode_row(self.conn.execute("SELECT * FROM dataset_versions WHERE id = ?", (job["datasetVersionId"],)).fetchone())
+        version = public_version(version_row)
+        dataset_ref = f"{version['datasetId']}@{version['version']}"
+        return self.submit_training_job(job["templateId"], dataset_ref, job["experimentName"], job["params"], job["owner"], job["team"], wait=wait)
+
+    def get_run(self, run_id: str) -> dict:
+        run = self.mlflow.get_run(run_id)
+        if not run:
+            raise ValueError("RUN_NOT_FOUND")
+        link = self.conn.execute("SELECT job_id FROM dataset_run_links WHERE mlflow_run_id = ?", (run_id,)).fetchone()
+        if link:
+            run["platform"] = {"jobId": link["job_id"]}
+        return run
+
+    def list_run_artifacts(self, run_id: str) -> list[str]:
+        return self.mlflow.list_artifacts(run_id)
+
+    def list_runs(self) -> list[dict]:
+        rows = self.conn.execute("SELECT id FROM runs ORDER BY created_at DESC").fetchall()
+        return [self.get_run(row["id"]) for row in rows]
+
+    def register_model_version(self, name: str, run_id: str, artifact_path: str, description: str = "", tags: dict | None = None) -> dict:
+        result = self.mlflow.register_model_version(name, run_id, artifact_path, description, tags or {})
+        self.conn.execute(
+            """
+            UPDATE dataset_run_links
+            SET registered_model_name = ?, model_version = ?
+            WHERE mlflow_run_id = ?
+            """,
+            (name, result["version"], run_id),
+        )
+        self.audit("system", "system", "model.version.register", "model_version", f"{name}:{result['version']}", {"runId": run_id})
+        self.conn.commit()
+        return result
+
+    def set_model_alias(self, name: str, alias: str, version: str, operator: str = "unknown", reason: str = "") -> dict:
+        result = self.mlflow.set_alias(name, alias, version)
+        self.conn.execute(
+            """
+            INSERT INTO model_alias_audits(id, registered_model_name, model_version, alias, action, operator, reason, created_at)
+            VALUES (?, ?, ?, ?, 'set', ?, ?, ?)
+            """,
+            (f"maa_{uuid4().hex[:12]}", name, version, alias, operator, reason, now()),
+        )
+        self.audit(operator, "unknown", "model.alias.set", "model_alias", f"{name}:{alias}", {"version": version, "reason": reason})
+        self.conn.commit()
+        return result
+
+    def delete_model_alias(self, name: str, alias: str, operator: str = "unknown", reason: str = "") -> dict:
+        current = self.mlflow.list_aliases(name)
+        version = current.get(alias, "")
+        result = self.mlflow.delete_alias(name, alias)
+        self.conn.execute(
+            """
+            INSERT INTO model_alias_audits(id, registered_model_name, model_version, alias, action, operator, reason, created_at)
+            VALUES (?, ?, ?, ?, 'delete', ?, ?, ?)
+            """,
+            (f"maa_{uuid4().hex[:12]}", name, version, alias, operator, reason, now()),
+        )
+        self.audit(operator, "unknown", "model.alias.delete", "model_alias", f"{name}:{alias}", {"reason": reason})
+        self.conn.commit()
+        return result
+
+    def list_model_aliases(self, name: str) -> dict[str, str]:
+        return self.mlflow.list_aliases(name)
+
+    def list_models(self) -> list[dict]:
+        rows = self.conn.execute("SELECT name, created_at FROM registered_models ORDER BY created_at DESC").fetchall()
+        models = []
+        for row in rows:
+            versions = self.conn.execute(
+                "SELECT version, run_id, artifact_path, description, tags, created_at FROM model_versions WHERE name = ? ORDER BY CAST(version AS INTEGER) DESC",
+                (row["name"],),
+            ).fetchall()
+            models.append(
+                {
+                    "name": row["name"],
+                    "createdAt": row["created_at"],
+                    "aliases": self.list_model_aliases(row["name"]),
+                    "versions": [
+                        {
+                            "version": version["version"],
+                            "runId": version["run_id"],
+                            "artifactPath": version["artifact_path"],
+                            "description": version["description"],
+                            "tags": load(version["tags"]),
+                            "createdAt": version["created_at"],
+                        }
+                        for version in versions
+                    ],
+                }
+            )
+        return models
+
+    def evaluate_model_version(self, name: str, version: str, test_dataset_ref: str, owner: str = "unknown", team: str = "unknown") -> dict:
+        model = self.conn.execute(
+            "SELECT run_id, artifact_path FROM model_versions WHERE name = ? AND version = ?",
+            (name, version),
+        ).fetchone()
+        if not model:
+            raise ValueError("MODEL_VERSION_NOT_FOUND")
+        test_version = self.parse_dataset_ref(test_dataset_ref)
+        test_dataset = self.get_dataset(test_version["datasetId"])
+        if test_dataset["type"] != "eval_set":
+            raise ValueError("TEST_DATASET_REQUIRED")
+        model_path = self.home / "mlruns" / model["run_id"] / model["artifact_path"] / "model.json"
+        if not model_path.exists():
+            raise ValueError("MODEL_ARTIFACT_NOT_FOUND")
+        payload = json.loads(model_path.read_text(encoding="utf-8"))
+        rows = self._read_csv_numeric(test_version["storageUri"])
+        columns = payload.get("numericColumns", [])
+        centers = payload.get("centers", [])
+        if centers:
+            values = [[float(row[col]) for col in columns] for row in rows]
+            metrics = {
+                "test_inertia": round(self._inertia(values, centers), 6),
+                "test_rows": len(values),
+            }
+        elif payload.get("modelKind") == "linear_regression":
+            target = payload.get("target", "")
+            feature_cols = payload.get("featureColumns", [])
+            if not target:
+                raise ValueError("TARGET_REQUIRED")
+            if not rows:
+                raise ValueError("DATASET_EMPTY")
+            if target not in rows[0]:
+                raise ValueError("TARGET_COLUMN_NOT_FOUND")
+            if not isinstance(rows[0].get(target), (int, float)):
+                raise ValueError("TARGET_MUST_BE_NUMERIC")
+            coefficients = payload.get("coefficients", [])
+            intercept = float(payload.get("intercept", 0))
+            predictions = []
+            targets = []
+            for row in rows:
+                for col in feature_cols:
+                    if col not in row or not isinstance(row[col], (int, float)):
+                        raise ValueError("FEATURE_COLUMN_MUST_BE_NUMERIC")
+                predictions.append(intercept + sum(float(coefficients[i]) * float(row[col]) for i, col in enumerate(feature_cols)))
+                targets.append(float(row[target]))
+            metrics = {f"test_{key}": value for key, value in self._regression_metrics(targets, predictions).items()}
+            metrics["test_rows"] = len(rows)
+        else:
+            raise ValueError("MODEL_NOT_EVALUABLE")
+        train_ref = self.get_run(model["run_id"])["tags"].get("dataset_version", "")
+        evaluation_id = f"eval_{uuid4().hex[:12]}"
+        self.conn.execute(
+            """
+            INSERT INTO evaluations(
+              id, registered_model_name, model_version, run_id, train_dataset_ref,
+              test_dataset_ref, metrics, status, owner, team, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?)
+            """,
+            (evaluation_id, name, version, model["run_id"], train_ref, test_dataset_ref, dump(metrics), owner, team, now()),
+        )
+        self.audit(owner, team, "model.evaluate", "evaluation", evaluation_id, {"model": name, "version": version, "testDatasetRef": test_dataset_ref})
+        self.conn.commit()
+        return self.get_evaluation(evaluation_id)
+
+    def get_evaluation(self, evaluation_id: str) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM evaluations WHERE id = ?", (evaluation_id,)).fetchone())
+        if not row:
+            raise ValueError("EVALUATION_NOT_FOUND")
+        return public_evaluation(row)
+
+    def list_evaluations(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC").fetchall()
+        return [public_evaluation(decode_row(row)) for row in rows]
+
+    def list_alias_audits(self, name: str) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM model_alias_audits WHERE registered_model_name = ? ORDER BY created_at", (name,)).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "registeredModelName": row["registered_model_name"],
+                "modelVersion": row["model_version"],
+                "alias": row["alias"],
+                "action": row["action"],
+                "operator": row["operator"],
+                "reason": row["reason"],
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def dataset_lineage(self, dataset_ref: str) -> list[dict]:
+        version = self.parse_dataset_ref(dataset_ref)
+        rows = self.conn.execute(
+            """
+            SELECT l.*, j.status AS job_status FROM dataset_run_links l
+            JOIN training_jobs j ON j.id = l.job_id
+            WHERE l.dataset_version_id = ?
+            ORDER BY l.created_at
+            """,
+            (version["id"],),
+        ).fetchall()
+        return [
+            {
+                "datasetVersionId": row["dataset_version_id"],
+                "jobId": row["job_id"],
+                "jobStatus": row["job_status"],
+                "mlflowRunId": row["mlflow_run_id"],
+                "registeredModelName": row["registered_model_name"],
+                "modelVersion": row["model_version"],
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def dashboard(self) -> dict:
+        datasets = self.list_datasets()
+        jobs = self.list_training_jobs()
+        runs = self.list_runs()
+        models = self.list_models()
+        evaluations = self.list_evaluations()
+        succeeded = sum(1 for job in jobs if job["status"] == "succeeded")
+        failed = sum(1 for job in jobs if job["status"] == "failed")
+        return {
+            "summary": {
+                "datasets": len(datasets),
+                "datasetVersions": sum(dataset.get("versionCount", 0) for dataset in datasets),
+                "testSets": sum(1 for dataset in datasets if dataset["type"] == "eval_set"),
+                "jobs": len(jobs),
+                "runs": len(runs),
+                "models": len(models),
+                "evaluations": len(evaluations),
+                "succeededJobs": succeeded,
+                "failedJobs": failed,
+            },
+            "datasets": datasets,
+            "jobs": jobs,
+            "runs": runs,
+            "models": models,
+            "evaluations": evaluations,
+            "templates": self.list_templates(),
+        }
+
+    def create_kmeans_demo(self) -> dict:
+        source = self.home / "demo-kmeans-blobs.csv"
+        rows = [
+            (-0.2, 0.1, "cluster_a"),
+            (0.0, -0.1, "cluster_a"),
+            (0.3, 0.2, "cluster_a"),
+            (9.8, 10.1, "cluster_b"),
+            (10.2, 9.9, "cluster_b"),
+            (10.0, 10.3, "cluster_b"),
+            (20.2, -0.1, "cluster_c"),
+            (19.8, 0.2, "cluster_c"),
+            (20.0, -0.3, "cluster_c"),
+        ]
+        source.write_text("x,y,label\n" + "".join(f"{x},{y},{label}\n" for x, y, label in rows), encoding="utf-8")
+        storage_uri = "s3://datasets/kmeans-blobs/v1/blobs.csv"
+        self.storage.put_file(storage_uri, source)
+        dataset = self.create_dataset(
+            "kmeans-blobs",
+            "tabular",
+            "alice",
+            "ml",
+            "Three synthetic clusters for Phase 1 verification",
+            ["phase1", "kmeans"],
+        )
+        version = self.add_dataset_version(
+            dataset["id"],
+            "v1",
+            storage_uri,
+            "csv",
+            schema={"columns": [{"name": "x", "type": "float"}, {"name": "y", "type": "float"}, {"name": "label", "type": "string"}]},
+            split={"train": 1.0},
+            created_by="alice",
+        )
+        job = self.submit_training_job("sklearn-kmeans", f"{dataset['id']}@v1", "demo/kmeans-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True)
+        run = self.get_run(job["mlflowRunId"])
+        model_version = self.register_model_version("kmeans-blobs-model", run["id"], "model", "Synthetic three-cluster baseline", {"dataset_version": f"{dataset['id']}@v1"})
+        aliases = self.set_model_alias("kmeans-blobs-model", "champion", model_version["version"], operator="alice", reason="ui demo workflow")
+        return {
+            "dataset": dataset,
+            "version": version,
+            "job": job,
+            "run": run,
+            "modelVersion": model_version,
+            "aliases": aliases,
+            "lineage": self.dataset_lineage(f"{dataset['id']}@v1"),
+        }
+
+    def create_full_test_demo(self) -> dict:
+        train_source_v1 = self.home / "train-blobs-v1.csv"
+        train_source_v2 = self.home / "train-blobs-v2.csv"
+        test_source = self.home / "test-blobs.csv"
+        train_v1_rows = [
+            (-0.4, 0.0, "cluster_a"),
+            (0.1, 0.2, "cluster_a"),
+            (9.7, 10.4, "cluster_b"),
+            (10.4, 9.8, "cluster_b"),
+            (20.3, 0.4, "cluster_c"),
+            (19.7, -0.2, "cluster_c"),
+        ]
+        train_v2_rows = train_v1_rows + [
+            (0.3, -0.3, "cluster_a"),
+            (10.0, 10.0, "cluster_b"),
+            (20.1, -0.4, "cluster_c"),
+        ]
+        test_rows = [
+            (0.2, 0.1, "cluster_a"),
+            (9.9, 10.2, "cluster_b"),
+            (20.4, 0.0, "cluster_c"),
+        ]
+
+        def write_rows(path: Path, rows: list[tuple[float, float, str]]) -> None:
+            path.write_text("x,y,label\n" + "".join(f"{x},{y},{label}\n" for x, y, label in rows), encoding="utf-8")
+
+        write_rows(train_source_v1, train_v1_rows)
+        write_rows(train_source_v2, train_v2_rows)
+        write_rows(test_source, test_rows)
+        self.storage.put_file("s3://datasets/e2e-blobs/v1/train.csv", train_source_v1)
+        self.storage.put_file("s3://datasets/e2e-blobs/v2/train.csv", train_source_v2)
+        self.storage.put_file("s3://datasets/e2e-blobs-test/v1/test.csv", test_source)
+
+        train_dataset = self.create_dataset("e2e-blobs", "tabular", "alice", "ml", "Training blobs with two versions", ["e2e", "train"])
+        train_v1 = self.add_dataset_version(train_dataset["id"], "v1", "s3://datasets/e2e-blobs/v1/train.csv", "csv", split={"train": 1.0}, created_by="alice")
+        train_v2 = self.add_dataset_version(train_dataset["id"], "v2", "s3://datasets/e2e-blobs/v2/train.csv", "csv", split={"train": 1.0}, created_by="alice")
+        test_dataset = self.create_dataset("e2e-blobs-test", "eval_set", "alice", "ml", "Held-out KMeans test set", ["e2e", "test"])
+        test_v1 = self.add_dataset_version(test_dataset["id"], "v1", "s3://datasets/e2e-blobs-test/v1/test.csv", "csv", split={"test": 1.0}, created_by="alice")
+        job = self.submit_training_job("sklearn-kmeans", f"{train_dataset['id']}@v2", "demo/e2e-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True)
+        run = self.get_run(job["mlflowRunId"])
+        model_version = self.register_model_version("e2e-blobs-model", run["id"], "model", "E2E training dataset v2 baseline", {"dataset_version": f"{train_dataset['id']}@v2"})
+        aliases = self.set_model_alias("e2e-blobs-model", "challenger", model_version["version"], operator="alice", reason="browser e2e test")
+        evaluation = self.evaluate_model_version("e2e-blobs-model", model_version["version"], f"{test_dataset['id']}@v1", "alice", "ml")
+        slow_training = self.create_slow_training_demo()
+        regression = self.create_regression_demo()
+        return {
+            "trainDataset": train_dataset,
+            "trainVersions": [train_v1, train_v2],
+            "testDataset": test_dataset,
+            "testVersion": test_v1,
+            "slowDataset": slow_training["dataset"],
+            "slowVersion": slow_training["version"],
+            "regressionTrainDataset": regression["trainDataset"],
+            "regressionTestDataset": regression["testDataset"],
+            "regressionTrainVersion": regression["trainVersion"],
+            "regressionTestVersion": regression["testVersion"],
+            "job": job,
+            "run": run,
+            "modelVersion": model_version,
+            "aliases": aliases,
+            "evaluation": evaluation,
+        }
+
+    def create_slow_training_demo(self) -> dict:
+        source = self.home / "slow-blobs.csv"
+        rows = []
+        for i in range(1500):
+            cluster = i % 3
+            base_x = cluster * 10.0
+            base_y = 0.0 if cluster != 1 else 10.0
+            x = base_x + ((i % 37) - 18) / 10
+            y = base_y + ((i % 29) - 14) / 10
+            rows.append((round(x, 3), round(y, 3), f"cluster_{cluster}"))
+        source.write_text("x,y,label\n" + "".join(f"{x},{y},{label}\n" for x, y, label in rows), encoding="utf-8")
+        storage_uri = "s3://datasets/slow-blobs/v1/train.csv"
+        self.storage.put_file(storage_uri, source)
+        dataset = self.create_dataset("slow-blobs", "tabular", "alice", "ml", "Larger KMeans demo dataset with a five-second training floor", ["demo", "slow", "kmeans"])
+        version = self.add_dataset_version(
+            dataset["id"],
+            "v1",
+            storage_uri,
+            "csv",
+            schema={"columns": [{"name": "x", "type": "float"}, {"name": "y", "type": "float"}, {"name": "label", "type": "string"}]},
+            split={"train": 1.0, "minTrainingSeconds": 5},
+            created_by="alice",
+        )
+        return {"dataset": dataset, "version": version}
+
+    def create_regression_demo(self) -> dict:
+        train_source = self.home / "regression-train.csv"
+        test_source = self.home / "regression-test.csv"
+        train_rows = []
+        for i in range(40):
+            sqft = 700 + i * 45
+            bedrooms = 1 + (i % 4)
+            age = i % 18
+            price = 50_000 + sqft * 155 + bedrooms * 12_000 - age * 850
+            train_rows.append((sqft, bedrooms, age, price))
+        test_rows = []
+        for i in range(10):
+            sqft = 820 + i * 110
+            bedrooms = 2 + (i % 3)
+            age = (i * 2) % 15
+            price = 50_000 + sqft * 155 + bedrooms * 12_000 - age * 850
+            test_rows.append((sqft, bedrooms, age, price))
+
+        def write_rows(path: Path, rows: list[tuple[int, int, int, int]]) -> None:
+            path.write_text("sqft,bedrooms,age,price\n" + "".join(f"{sqft},{bedrooms},{age},{price}\n" for sqft, bedrooms, age, price in rows), encoding="utf-8")
+
+        write_rows(train_source, train_rows)
+        write_rows(test_source, test_rows)
+        self.storage.put_file("s3://datasets/regression-houses/v1/train.csv", train_source)
+        self.storage.put_file("s3://datasets/regression-houses-test/v1/test.csv", test_source)
+        schema = {
+            "columns": [
+                {"name": "sqft", "type": "float"},
+                {"name": "bedrooms", "type": "float"},
+                {"name": "age", "type": "float"},
+                {"name": "price", "type": "float"},
+            ]
+        }
+        train_dataset = self.create_dataset("regression-houses", "tabular", "alice", "ml", "House price regression training data", ["demo", "regression"])
+        train_version = self.add_dataset_version(train_dataset["id"], "v1", "s3://datasets/regression-houses/v1/train.csv", "csv", schema=schema, split={"train": 1.0}, created_by="alice")
+        test_dataset = self.create_dataset("regression-houses-test", "eval_set", "alice", "ml", "House price regression test data", ["demo", "regression", "test"])
+        test_version = self.add_dataset_version(test_dataset["id"], "v1", "s3://datasets/regression-houses-test/v1/test.csv", "csv", schema=schema, split={"test": 1.0}, created_by="alice")
+        return {"trainDataset": train_dataset, "trainVersion": train_version, "testDataset": test_dataset, "testVersion": test_version}
+
+    def healthz(self) -> dict:
+        self.conn.execute("SELECT 1").fetchone()
+        self._check_http_dependency(os.environ.get("MLFLOW_TRACKING_URI"), "/health", "MLFLOW_UNAVAILABLE")
+        self._check_http_dependency(os.environ.get("MLFLOW_S3_ENDPOINT_URL"), "/minio/health/live", "MINIO_UNAVAILABLE")
+        return {"status": "ok", "database": "ok", "mlflow": "ok", "objectStorage": "ok"}
+
+    def _check_http_dependency(self, base_url: str | None, path: str, error_code: str) -> None:
+        if not base_url:
+            return
+        url = base_url.rstrip("/") + path
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.status >= 400:
+                    raise ValueError(error_code)
+        except Exception as exc:
+            raise ValueError(error_code) from exc
+
+    def audit(self, actor: str, team: str, action: str, resource_type: str, resource_id: str, request: dict) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO audits(id, actor, team, action, resource_type, resource_id, request, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (f"audit_{uuid4().hex[:12]}", actor, team, action, resource_type, resource_id, dump(request), now()),
+        )

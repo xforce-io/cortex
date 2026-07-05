@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cortex Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div>
+            <div class="brand-name">Cortex</div>
+            <div class="brand-subtitle">ML Platform</div>
+          </div>
+        </div>
+        <nav class="nav-list">
+          <button class="nav-item active" data-view="dashboard">Dashboard</button>
+          <button class="nav-item" data-view="datasets">Datasets</button>
+          <button class="nav-item" data-view="training">Training</button>
+          <button class="nav-item" data-view="runs">Experiments</button>
+          <button class="nav-item" data-view="models">Models</button>
+          <button class="nav-item" data-view="tests">Evaluations</button>
+        </nav>
+        <div class="sidebar-status">
+          <span class="status-dot" id="healthDot"></span>
+          <span id="healthText">Checking</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1>Workspace</h1>
+            <p id="lastUpdated">Not synced</p>
+          </div>
+          <div class="toolbar">
+            <button class="icon-button" id="refreshButton" title="Refresh" aria-label="Refresh">
+              <span aria-hidden="true">↻</span>
+              <span>Refresh data</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="dashboard" class="dashboard-view active">
+          <section class="metrics-grid" aria-label="Summary">
+            <button class="metric metric-link" data-view-target="datasets" type="button">
+              <span>Datasets</span>
+              <strong id="metricDatasets">0</strong>
+            </button>
+            <button class="metric metric-link" data-view-target="training" type="button">
+              <span>Jobs</span>
+              <strong id="metricJobs">0</strong>
+            </button>
+            <button class="metric metric-link" data-view-target="runs" type="button">
+              <span>Runs</span>
+              <strong id="metricRuns">0</strong>
+            </button>
+            <button class="metric metric-link" data-view-target="models" type="button">
+              <span>Models</span>
+              <strong id="metricModels">0</strong>
+            </button>
+            <button class="metric metric-link" data-view-target="tests" type="button">
+              <span>Tests</span>
+              <strong id="metricTests">0</strong>
+            </button>
+          </section>
+
+          <section class="empty-state" id="emptyState">
+            <div>
+              <h2>No ML assets yet</h2>
+              <p>Create a sample project to review dataset versioning, training runs, model registration, and evaluation results in one workspace.</p>
+            </div>
+            <button class="secondary-button" id="emptyImportButton">Create example workspace</button>
+          </section>
+
+          <section class="workbench" id="overviewWorkbench">
+            <div class="panel lineage-panel">
+              <div class="panel-header">
+                <h2>Lineage</h2>
+                <span id="lineageLabel">No run selected</span>
+              </div>
+              <svg class="lineage-map" viewBox="0 0 720 180" role="img" aria-label="Dataset to job to run to model lineage">
+                <defs>
+                  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                  </marker>
+                </defs>
+                <g class="edge">
+                  <line x1="160" y1="90" x2="270" y2="90"></line>
+                  <line x1="400" y1="90" x2="510" y2="90"></line>
+                </g>
+                <g class="node dataset-node">
+                  <rect x="20" y="45" width="140" height="90" rx="8"></rect>
+                  <text x="90" y="85">Dataset</text>
+                  <text x="90" y="110" id="lineageDataset">empty</text>
+                </g>
+                <g class="node job-node">
+                  <rect x="270" y="45" width="130" height="90" rx="8"></rect>
+                  <text x="335" y="85">Job / Run</text>
+                  <text x="335" y="110" id="lineageRun">empty</text>
+                </g>
+                <g class="node model-node">
+                  <rect x="510" y="45" width="170" height="90" rx="8"></rect>
+                  <text x="595" y="85">Model Alias</text>
+                  <text x="595" y="110" id="lineageModel">empty</text>
+                </g>
+              </svg>
+            </div>
+
+            <div class="panel chart-panel">
+              <div class="panel-header">
+                <h2>Run Metrics</h2>
+                <span>inertia / rows</span>
+              </div>
+              <canvas id="metricsCanvas" width="360" height="180" aria-label="Run metrics chart"></canvas>
+            </div>
+          </section>
+        </section>
+
+        <section id="datasets" class="table-view">
+          <div class="section-header">
+            <h2>Datasets</h2>
+            <span id="datasetCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>Type</th><th>Versions</th><th>Latest</th><th>Owner</th><th>Status</th></tr>
+              </thead>
+              <tbody id="datasetsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="datasetDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="training" class="table-view">
+          <div class="section-header">
+            <h2>Training Jobs</h2>
+            <div class="section-actions">
+              <span id="jobCount">0 records</span>
+              <button class="primary-button" id="newJobButton">New training job</button>
+            </div>
+          </div>
+          <section class="inline-form" id="trainingJobForm" hidden>
+            <form id="jobForm">
+              <div class="form-grid">
+                <label>
+                  <span>Template</span>
+                  <select id="jobTemplate" name="templateId" required></select>
+                </label>
+                <label>
+                  <span>Dataset version</span>
+                  <select id="jobDataset" name="datasetRef" required></select>
+                </label>
+                <label>
+                  <span>Experiment</span>
+                  <input id="jobExperiment" name="experimentName" value="manual/training" required />
+                </label>
+                <label>
+                  <span>Owner</span>
+                  <input name="owner" value="alice" required />
+                </label>
+                <label>
+                  <span>Team</span>
+                  <input name="team" value="ml" required />
+                </label>
+              </div>
+              <div class="param-grid" id="jobParams"></div>
+              <div class="form-footer">
+                <p id="jobFormStatus"></p>
+                <div class="toolbar">
+                  <button class="secondary-button" type="button" id="cancelJobForm">Cancel</button>
+                  <button class="primary-button" type="submit" id="submitJobButton">Submit job</button>
+                </div>
+              </div>
+            </form>
+          </section>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Job</th><th>Template</th><th>Status</th><th>Run</th><th>Owner</th></tr>
+              </thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="jobDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="runs" class="table-view">
+          <div class="section-header">
+            <h2>Experiments</h2>
+            <span id="runCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Run</th><th>Status</th><th>Dataset</th><th>Inertia</th><th>Rows</th></tr>
+              </thead>
+              <tbody id="runsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="runDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="models" class="table-view">
+          <div class="section-header">
+            <h2>Models</h2>
+            <span id="modelCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>Versions</th><th>Champion</th><th>Challenger</th></tr>
+              </thead>
+              <tbody id="modelsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="modelDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="tests" class="table-view">
+          <div class="section-header">
+            <h2>Evaluations</h2>
+            <span id="testCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Evaluation</th><th>Model</th><th>Train Dataset</th><th>Test Set</th><th>Test Inertia</th><th>Status</th></tr>
+              </thead>
+              <tbody id="testsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="evaluationDetail" aria-live="polite"></section>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
