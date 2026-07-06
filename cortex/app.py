@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import os
 import sys
@@ -136,7 +137,7 @@ def public_evaluation(row: dict) -> dict:
     }
 
 
-EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor"}
+EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor", "statsmodels-mstl"}
 
 
 class CortexApp:
@@ -646,6 +647,38 @@ class CortexApp:
                 }
             )
             progress(90, "Computed regression metrics")
+        elif job["templateId"] == "statsmodels-mstl":
+            progress(30, "Preparing MSTL series")
+            trend = str(job["params"].get("trend", "additive"))
+            max_iter = int(job["params"].get("max_iter", 100))
+            value_column = str(job["params"].get("value_column", "")).strip()
+            if value_column == "":
+                value_column = None
+            time_column = str(job["params"].get("time_column", "")).strip() or None
+            series = self._prepare_mstl_series(rows, value_column=value_column, time_column=time_column)
+            periods = self._parse_mstl_periods(job["params"].get("periods"))
+            periods = self._validate_mstl_periods(periods, len(series))
+            decomposition = self._run_mstl(series, periods, trend=trend, max_iter=max_iter)
+            fitted = self._mstl_fitted(decomposition, len(series))
+            metrics = self._regression_metrics(series.tolist(), fitted)
+            metrics["rows"] = len(series)
+            metrics["periods_count"] = len(periods)
+            model_payload.update(
+                {
+                    "modelKind": "mstl",
+                    "valueColumn": series.name or "",
+                    "timeColumn": time_column or "",
+                    "periods": periods,
+                    "trend": trend,
+                    "maxIter": max_iter,
+                    "seriesInfo": {
+                        "rows": len(series),
+                        "firstIndex": str(series.index[0]) if len(series) else "",
+                        "lastIndex": str(series.index[-1]) if len(series) else "",
+                    },
+                }
+            )
+            progress(95, "Computed MSTL metrics")
         else:
             raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
         model_file = self.home / "jobs" / job["id"] / "model.json"
@@ -675,6 +708,123 @@ class CortexApp:
                         parsed[key] = value
                 rows.append(parsed)
         return rows
+
+    def _parse_mstl_periods(self, raw_periods: object | None) -> list[int]:
+        if raw_periods is None:
+            raise ValueError("MSTL_INVALID_PERIODS")
+        if isinstance(raw_periods, (list, tuple)):
+            periods = list(raw_periods)
+        else:
+            if not isinstance(raw_periods, str):
+                raw_periods = str(raw_periods)
+            text = str(raw_periods).strip()
+            if not text:
+                raise ValueError("MSTL_INVALID_PERIODS")
+            periods = [part.strip() for part in text.split(",") if part.strip()]
+        parsed = []
+        for period in periods:
+            try:
+                value = int(period)
+            except (TypeError, ValueError):
+                raise ValueError("MSTL_INVALID_PERIODS")
+            if value <= 0:
+                raise ValueError("MSTL_INVALID_PERIODS")
+            parsed.append(value)
+        if not parsed:
+            raise ValueError("MSTL_INVALID_PERIODS")
+        return parsed
+
+    def _validate_mstl_periods(self, periods: list[int], series_length: int) -> list[int]:
+        if not periods:
+            raise ValueError("MSTL_INVALID_PERIODS")
+        if series_length < 2:
+            raise ValueError("MSTL_INVALID_PERIODS")
+        for period in periods:
+            if period <= 0:
+                raise ValueError("MSTL_INVALID_PERIODS")
+            if period * 2 >= series_length:
+                raise ValueError("MSTL_INVALID_PERIODS")
+        return periods
+
+    def _prepare_mstl_series(self, rows: list[dict], value_column: str | None = None, time_column: str | None = None):
+        if not rows:
+            raise ValueError("DATASET_EMPTY")
+        if not value_column:
+            numeric_columns = [key for key, value in rows[0].items() if isinstance(value, (int, float))]
+            if not numeric_columns:
+                raise ValueError("MSTL_NO_NUMERIC_DATA")
+            value_column = numeric_columns[0]
+        if value_column not in rows[0]:
+            raise ValueError("MSTL_VALUE_COLUMN_NOT_FOUND")
+        if time_column and time_column not in rows[0]:
+            raise ValueError("MSTL_TIME_COLUMN_NOT_FOUND")
+        import pandas as pd
+        values = []
+        index = []
+        for i, row in enumerate(rows):
+            raw = row[value_column]
+            if not isinstance(raw, (int, float)):
+                raise ValueError("MSTL_VALUE_COLUMN_INVALID")
+            values.append(float(raw))
+            if time_column:
+                index.append(row[time_column])
+            else:
+                index.append(i)
+        if time_column:
+            index_series = pd.to_datetime(pd.Index(index), errors="coerce")
+            if index_series.isna().any():
+                raise ValueError("MSTL_TIME_COLUMN_INVALID")
+            return pd.Series(values, index=index_series, name=value_column)
+        return pd.Series(values, index=pd.Index(index), name=value_column)
+
+    def _run_mstl(self, series, periods: list[int], trend: str, max_iter: int):
+        if not importlib.util.find_spec("statsmodels"):
+            raise ValueError("MSTL_NOT_AVAILABLE")
+        try:
+            from statsmodels.tsa.seasonal import MSTL
+        except Exception as exc:  # pragma: no cover - defensive for optional dependency import issues
+            raise ValueError("MSTL_NOT_AVAILABLE") from exc
+
+        try:
+            model = MSTL(series, periods=tuple(periods), trend=trend)
+        except TypeError:
+            try:
+                model = MSTL(series, periods, trend=trend)
+            except TypeError:
+                try:
+                    model = MSTL(series, periods=tuple(periods))
+                except TypeError:
+                    model = MSTL(series, periods)
+        try:
+            return model.fit(max_iter=max_iter)
+        except TypeError:
+            return model.fit()
+
+    def _mstl_fitted(self, decomposition, expected_length: int) -> list[float]:
+        for attr in ("fittedvalues", "fitted_values", "fitted"):
+            value = getattr(decomposition, attr, None)
+            if value is not None:
+                fitted = [float(item) for item in value]
+                if len(fitted) == expected_length:
+                    return fitted
+
+        observed = getattr(decomposition, "observed", None)
+        resid = getattr(decomposition, "resid", None)
+        if observed is not None and resid is not None:
+            observed_values = list(observed)
+            resid_values = list(resid)
+            if len(observed_values) == expected_length and len(resid_values) == expected_length:
+                return [float(observed_values[i]) - float(resid_values[i]) for i in range(expected_length)]
+
+        trend = getattr(decomposition, "trend", None)
+        seasonal = getattr(decomposition, "seasonal", None)
+        if trend is not None and seasonal is not None:
+            seasonal_sum = seasonal.sum(axis=1) if hasattr(seasonal, "sum") else None
+            if seasonal_sum is None:
+                seasonal_sum = [0.0 for _ in range(expected_length)]
+            if len(trend) == expected_length and len(seasonal_sum) == expected_length:
+                return [float(trend[i]) + float(seasonal_sum[i]) for i in range(expected_length)]
+        raise ValueError("MSTL_FITTED_VALUES_UNAVAILABLE")
 
     def _simple_kmeans(self, values: list[list[float]], k: int, progress=None, min_duration: float = 0) -> tuple[list[list[float]], float]:
         started = time.monotonic()
@@ -949,6 +1099,24 @@ class CortexApp:
                 targets.append(float(row[target]))
             metrics = {f"test_{key}": value for key, value in self._regression_metrics(targets, predictions).items()}
             metrics["test_rows"] = len(rows)
+        elif payload.get("modelKind") == "mstl":
+            value_column = payload.get("valueColumn", "")
+            time_column = payload.get("timeColumn", "")
+            periods = payload.get("periods", [])
+            if not rows:
+                raise ValueError("DATASET_EMPTY")
+            if not periods:
+                raise ValueError("MSTL_INVALID_PERIODS")
+            series = self._prepare_mstl_series(rows, value_column=value_column, time_column=time_column or None)
+            periods = self._validate_mstl_periods(self._parse_mstl_periods(",".join(str(period) for period in periods)), len(series))
+            trend = payload.get("trend", "additive")
+            max_iter = int(payload.get("maxIter", 100))
+            decomposition = self._run_mstl(series, periods, trend=trend, max_iter=max_iter)
+            predictions = self._mstl_fitted(decomposition, len(series))
+            if not predictions:
+                raise ValueError("MODEL_NOT_EVALUABLE")
+            metrics = {f"test_{key}": value for key, value in self._regression_metrics(list(series), predictions).items()}
+            metrics["test_rows"] = len(series)
         else:
             raise ValueError("MODEL_NOT_EVALUABLE")
         train_ref = self.get_run(model["run_id"])["tags"].get("dataset_version", "")

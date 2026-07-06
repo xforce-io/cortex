@@ -52,6 +52,7 @@ Templates are seeded into the `training_templates` table on database initializat
 | `sklearn-kmeans` | clustering | `tabular` | `n_clusters`, `random_state` | available |
 | `sklearn-regressor` | regression | `tabular` | `target` | available |
 | `sklearn-classifier` | classification | `tabular` | `target` | not implemented |
+| `statsmodels-mstl` | forecasting | `time_series` | `periods`, `value_column`, `time_column`, `trend`, `max_iter` | available |
 | `pytorch-basic` | training | `tabular`, `time_series` | `epochs` | not implemented |
 
 `sklearn-kmeans` writes a `model/model.json` artifact containing cluster centers and logs `inertia` and `rows`.

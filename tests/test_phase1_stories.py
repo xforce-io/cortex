@@ -1,5 +1,6 @@
 import json
 import os
+import importlib.util
 import signal
 import subprocess
 import sys
@@ -17,6 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Phase1StoriesTest(unittest.TestCase):
+    @staticmethod
+    def _skip_if_no_mstl() -> None:
+        if importlib.util.find_spec("statsmodels") is None:
+            raise unittest.SkipTest("statsmodels not installed")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
@@ -279,6 +285,108 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["progressPercent"], 100)
         self.assertEqual(job["statusMessage"], "Completed")
+
+    def test_mstl_training_and_evaluate(self):
+        self._skip_if_no_mstl()
+        dataset = self.app.create_dataset("mstl-demo", "time_series", "alice", "ml")
+        train_source = self.home / "mstl-train.csv"
+        train_rows = ["ts,value"]
+        for i in range(120):
+            train_rows.append(f"2020-01-{(i % 28) + 1:02d} {(i // 24):02d}:00:00,{10 + (i % 12) * 1.5}")
+        train_source.write_text("\n".join(train_rows), encoding="utf-8")
+        train_uri = "s3://datasets/mstl-demo/v1/train.csv"
+        self.app.storage.put_file(train_uri, train_source)
+        train_version = self.app.add_dataset_version(dataset["id"], "v1", train_uri, "csv", created_by="alice")
+
+        job = self.app.submit_training_job(
+            "statsmodels-mstl",
+            f"{dataset['id']}@{train_version['version']}",
+            "demo/mstl",
+            {"periods": "12", "time_column": "ts", "value_column": "value", "trend": "additive", "max_iter": 20},
+            "alice",
+            "ml",
+            wait=True,
+        )
+        run = self.app.get_run(job["mlflowRunId"])
+        model_payload = json.loads((self.app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(model_payload["modelKind"], "mstl")
+        self.assertIn("mae", run["metrics"])
+        self.assertIn("rmse", run["metrics"])
+
+        model_version = self.app.register_model_version(
+            "mstl-demo-model",
+            run["id"],
+            "model",
+            "MSTL baseline",
+        )
+
+        test_source = self.home / "mstl-test.csv"
+        test_rows = ["ts,value"]
+        for i in range(30):
+            test_rows.append(f"2020-02-{(i % 28) + 1:02d} {(i // 24):02d}:00:00,{10 + ((i + 120) % 12) * 1.5}")
+        test_source.write_text("\n".join(test_rows), encoding="utf-8")
+        test_uri = "s3://datasets/mstl-test/v1/test.csv"
+        self.app.storage.put_file(test_uri, test_source)
+        test_dataset = self.app.create_dataset("mstl-test", "eval_set", "alice", "ml")
+        test_version = self.app.add_dataset_version(test_dataset["id"], "v1", test_uri, "csv", created_by="alice")
+
+        evaluation = self.app.evaluate_model_version(
+            "mstl-demo-model",
+            model_version["version"],
+            f"{test_dataset['id']}@{test_version['version']}",
+            "alice",
+            "ml",
+        )
+
+        self.assertEqual(evaluation["status"], "succeeded")
+        self.assertIn("test_mae", evaluation["metrics"])
+        self.assertIn("test_rmse", evaluation["metrics"])
+
+    def test_mstl_invalid_periods(self):
+        self._skip_if_no_mstl()
+        dataset = self.app.create_dataset("mstl-invalid", "time_series", "alice", "ml")
+        invalid_source = self.home / "mstl-invalid.csv"
+        invalid_source.write_text("ts,value\n2020-01-01,1\n2020-01-02,2\n2020-01-03,3", encoding="utf-8")
+        invalid_uri = "s3://datasets/mstl-invalid/v1/train.csv"
+        self.app.storage.put_file(invalid_uri, invalid_source)
+        invalid_version = self.app.add_dataset_version(dataset["id"], "v1", invalid_uri, "csv", created_by="alice")
+
+        failed = self.app.submit_training_job(
+            "statsmodels-mstl",
+            f"{dataset['id']}@{invalid_version['version']}",
+            "demo/mstl-invalid",
+            {"periods": "abc", "time_column": "ts", "value_column": "value"},
+            "alice",
+            "ml",
+            wait=True,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("MSTL_INVALID_PERIODS", failed["errorMessage"])
+
+    def test_mstl_rejects_too_short_series(self):
+        self._skip_if_no_mstl()
+        dataset = self.app.create_dataset("mstl-short", "time_series", "alice", "ml")
+        source = self.home / "mstl-short.csv"
+        source.write_text("ts,value\n2020-01-01,1\n2020-01-02,2\n2020-01-03,3\n2020-01-04,4\n2020-01-05,5\n2020-01-06,6\n2020-01-07,7\n2020-01-08,8", encoding="utf-8")
+        source_uri = "s3://datasets/mstl-short/v1/train.csv"
+        self.app.storage.put_file(source_uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", source_uri, "csv", created_by="alice")
+
+        failed = self.app.submit_training_job(
+            "statsmodels-mstl",
+            f"{dataset['id']}@{version['version']}",
+            "demo/mstl-short",
+            {"periods": "4", "time_column": "ts", "value_column": "value"},
+            "alice",
+            "ml",
+            wait=True,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("MSTL_INVALID_PERIODS", failed["errorMessage"])
 
     def test_s2_s3_lineage_model_registration_and_alias_audit(self):
         dataset = self.app.create_dataset("demo-iris", "tabular", "alice", "ml")
