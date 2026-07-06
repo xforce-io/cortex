@@ -4,7 +4,7 @@ import json
 import mimetypes
 import os
 import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -309,7 +309,7 @@ def main() -> None:
     host = os.environ.get("CORTEX_HOST", "0.0.0.0")
     port = int(os.environ.get("CORTEX_PORT", "8000"))
     Handler.app = CortexApp.open()
-    server = HTTPServer((host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     print(f"cortex api listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 
