@@ -18,6 +18,8 @@ const state = {
     loadingVersions: false,
     submitting: false,
     error: "",
+    sourceJobId: null,
+    defaults: {},
   },
   registrationForm: {
     runId: null,
@@ -414,17 +416,19 @@ function renderTrainingForm() {
   renderTemplateOptions();
   renderDatasetOptions();
   renderParamInputs();
+  renderTrainingDefaults();
   renderJobFormStatus();
 }
 
 function renderTemplateOptions() {
   const select = $("#jobTemplate");
   if (!select || !state.dashboard) return;
-  const current = select.value;
+  const current = state.trainingForm.defaults.templateId || select.value;
   const templates = executableTemplates();
   select.innerHTML = templates.map((template) => `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)} · ${escapeHtml(template.id)}</option>`).join("");
   select.disabled = !templates.length;
   if (templates.some((template) => template.id === current)) select.value = current;
+  state.trainingForm.defaults.templateId = "";
 }
 
 function compatibleVersions(template) {
@@ -435,7 +439,7 @@ function compatibleVersions(template) {
 function renderDatasetOptions() {
   const select = $("#jobDataset");
   if (!select) return;
-  const selected = select.value;
+  const selected = state.trainingForm.defaults.datasetRef || select.value;
   const template = currentTemplate();
   const versions = compatibleVersions(template);
   if (state.trainingForm.loadingVersions) {
@@ -448,6 +452,7 @@ function renderDatasetOptions() {
     ? versions.map((item) => `<option value="${escapeHtml(item.ref)}">${escapeHtml(item.datasetName)}@${escapeHtml(item.version)} · ${escapeHtml(item.datasetType)}</option>`).join("")
     : `<option value="">No compatible dataset versions</option>`;
   if (versions.some((item) => item.ref === selected)) select.value = selected;
+  state.trainingForm.defaults.datasetRef = "";
 }
 
 function renderParamInputs() {
@@ -458,14 +463,33 @@ function renderParamInputs() {
     return;
   }
   const schema = template.paramSchema || {};
+  const defaultParams = state.trainingForm.defaults.params || {};
   container.innerHTML = Object.entries(schema)
     .map(([name, type]) => {
       const inputType = type === "int" || type === "float" ? "number" : "text";
       const step = type === "float" ? "any" : "1";
-      const value = name === "n_clusters" ? "3" : name === "random_state" ? "42" : name === "target" ? "price" : "";
+      const value = defaultParams[name] ??
+        (name === "n_clusters" ? "3" :
+          name === "random_state" ? "42" :
+          name === "target" ? "price" :
+          name === "periods" ? "24" :
+          name === "trend" ? "additive" :
+          name === "max_iter" ? "100" :
+          "");
       return `<label><span>${escapeHtml(name)}</span><input name="param:${escapeHtml(name)}" type="${inputType}" step="${step}" value="${escapeHtml(value)}" /></label>`;
     })
     .join("");
+  state.trainingForm.defaults.params = null;
+}
+
+function renderTrainingDefaults() {
+  const defaults = state.trainingForm.defaults;
+  if (defaults.experimentName) $("#jobExperiment").value = defaults.experimentName;
+  if (defaults.owner) $("#jobForm [name='owner']").value = defaults.owner;
+  if (defaults.team) $("#jobForm [name='team']").value = defaults.team;
+  state.trainingForm.defaults.experimentName = "";
+  state.trainingForm.defaults.owner = "";
+  state.trainingForm.defaults.team = "";
 }
 
 function renderJobFormStatus() {
@@ -482,6 +506,9 @@ function renderJobFormStatus() {
     status.className = "form-error";
   } else if (state.trainingForm.submitting) {
     status.textContent = "Submitting job";
+    status.className = "";
+  } else if (state.trainingForm.sourceJobId) {
+    status.textContent = `Editing failed job ${shortId(state.trainingForm.sourceJobId)}. Submit creates a new job.`;
     status.className = "";
   } else {
     status.textContent = "";
@@ -553,6 +580,7 @@ function renderJobDetail() {
   const registerAction = canRegisterRun(jobRun)
     ? `<button class="link-button" data-register-run="${escapeHtml(job.mlflowRunId)}"><span>Register as model</span></button>`
     : "";
+  const resubmitAction = job.status === "failed" ? `<button class="secondary-button" data-edit-failed-job="${escapeHtml(job.id)}">Edit and resubmit</button>` : "";
   setDetail(
     "#jobDetail",
     shortId(job.id),
@@ -578,6 +606,7 @@ function renderJobDetail() {
       ["Error", escapeHtml(job.errorMessage)],
     ]) +
       `<h4>Params</h4>${jsonBlock(job.params)}` +
+      resubmitAction +
       `<h4>Logs</h4>${jsonBlock(extra?.logs ?? (extra ? "" : "Loading logs"))}`,
   );
 }
@@ -758,6 +787,8 @@ async function openTrainingForm() {
   if (!state.currentProjectId) return;
   state.trainingForm.open = true;
   state.trainingForm.error = "";
+  state.trainingForm.sourceJobId = null;
+  state.trainingForm.defaults = {};
   renderTrainingForm();
   await loadTrainingVersions();
 }
@@ -765,7 +796,29 @@ async function openTrainingForm() {
 function closeTrainingForm() {
   state.trainingForm.open = false;
   state.trainingForm.error = "";
+  state.trainingForm.sourceJobId = null;
+  state.trainingForm.defaults = {};
   renderTrainingForm();
+}
+
+async function editFailedJob(jobId) {
+  const job = findResource("job", jobId);
+  if (!job || job.status !== "failed") return;
+  state.trainingForm.open = true;
+  state.trainingForm.error = "";
+  state.trainingForm.sourceJobId = job.id;
+  await loadTrainingVersions();
+  const version = state.trainingForm.versions.find((item) => item.id === job.datasetVersionId);
+  state.trainingForm.defaults = {
+    templateId: job.templateId,
+    datasetRef: version?.ref || "",
+    experimentName: job.experimentName,
+    owner: job.owner,
+    team: job.team,
+    params: { ...(job.params || {}) },
+  };
+  renderTrainingForm();
+  $("#trainingJobForm").scrollIntoView({ block: "nearest" });
 }
 
 async function loadTrainingVersions() {
@@ -829,6 +882,8 @@ async function submitTrainingJob(event) {
     });
     state.selected.job = job.id;
     state.trainingForm.open = false;
+    state.trainingForm.sourceJobId = null;
+    state.trainingForm.defaults = {};
     upsertJob(job);
     render();
     applyView("training");
@@ -967,6 +1022,12 @@ document.addEventListener("click", (event) => {
   if (metricLink) {
     event.preventDefault();
     applyView(metricLink.dataset.viewTarget);
+    return;
+  }
+  const editFailedButton = event.target.closest("[data-edit-failed-job]");
+  if (editFailedButton) {
+    event.preventDefault();
+    editFailedJob(editFailedButton.dataset.editFailedJob);
     return;
   }
   const openRegisterButton = event.target.closest("[data-open-register-run]");
