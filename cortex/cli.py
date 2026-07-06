@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     version_add.add_argument("--format", required=True)
     version_add.add_argument("--checksum")
     version_add.add_argument("--created-by", default="unknown")
+    version_import = version_sub.add_parser("import")
+    version_import.add_argument("dataset_id")
+    version_import.add_argument("--version", required=True)
+    version_import.add_argument("--source", required=True)
+    version_import.add_argument("--format", default="csv")
+    version_import.add_argument("--created-by", default="unknown")
 
     train = sub.add_parser("train")
     train_sub = train.add_subparsers(dest="command", required=True)
@@ -156,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
             print_json(app.dataset_lineage(args.dataset_ref))
         elif args.group == "dataset" and args.command == "version" and args.version_command == "add":
             print_json(app.add_dataset_version(args.dataset_id, args.version, args.storage_uri, args.format, args.checksum, created_by=args.created_by))
+        elif args.group == "dataset" and args.command == "version" and args.version_command == "import":
+            print_json(app.import_dataset_version(args.dataset_id, args.version, args.source, args.format, created_by=args.created_by))
         elif args.group == "train" and args.command == "templates":
             print_json(app.list_templates())
         elif args.group == "train" and args.command == "submit":

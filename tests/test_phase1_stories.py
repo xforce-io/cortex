@@ -142,6 +142,53 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(self.app.list_runs(project_id=churn["id"])[0]["id"], run["id"])
         self.assertEqual(lineage[0]["projectId"], churn["id"])
 
+    def test_import_local_csv_version_profiles_schema_and_validation(self):
+        dataset = self.app.create_dataset("generic-series", "time_series", "alice", "ml")
+        source = self.home / "input.csv"
+        source.write_text(
+            "entity_key,event_time,target_value,category\n"
+            "a,2026-01-01 00:00:00,1.5,x\n"
+            "a,2026-01-01 01:00:00,2.0,\n"
+            "b,2026-01-01 00:00:00,3.25,y\n",
+            encoding="utf-8",
+        )
+
+        version = self.app.import_dataset_version(
+            dataset["id"],
+            "v1",
+            source,
+            data_format="csv",
+            created_by="alice",
+        )
+
+        self.assertEqual(version["version"], "v1")
+        self.assertEqual(version["format"], "csv")
+        self.assertEqual(version["rowCount"], 3)
+        self.assertEqual(version["sampleCount"], 3)
+        self.assertTrue(version["storageUri"].startswith("s3://datasets/"))
+        self.assertNotIn(str(source), version["storageUri"])
+        schema = version["schema"]
+        self.assertEqual([column["name"] for column in schema["columns"]], ["entity_key", "event_time", "target_value", "category"])
+        types = {column["name"]: column["type"] for column in schema["columns"]}
+        self.assertEqual(types["entity_key"], "string")
+        self.assertEqual(types["event_time"], "datetime_like")
+        self.assertEqual(types["target_value"], "number")
+        self.assertEqual(types["category"], "string")
+        profile = version["profile"]
+        self.assertEqual(profile["rows"], 3)
+        self.assertEqual(profile["columns"], 4)
+        self.assertEqual(profile["missingValues"]["category"], 1)
+        self.assertEqual(profile["numeric"]["target_value"]["min"], 1.5)
+        self.assertEqual(profile["numeric"]["target_value"]["max"], 3.25)
+        self.assertIn("event_time", profile["datetimeLike"])
+        self.assertTrue(self.app.storage.exists(version["storageUri"]))
+
+    def test_import_local_csv_rejects_missing_source(self):
+        dataset = self.app.create_dataset("generic-missing", "tabular", "alice", "ml")
+
+        with self.assertRaisesRegex(ValueError, "LOCAL_SOURCE_NOT_FOUND"):
+            self.app.import_dataset_version(dataset["id"], "v1", self.home / "missing.csv", created_by="alice")
+
     def test_private_dataset_requires_project_link(self):
         owner_project = self.app.create_project("private-owner", "alice", "ml")
         other_project = self.app.create_project("other-project", "bob", "ml")
@@ -517,6 +564,44 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(alias["challenger"], model_version["version"])
         self.assertEqual(lineage[0]["mlflowRunId"], run["id"])
 
+    def test_cli_imports_local_dataset_version(self):
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["PYTHONPATH"] = str(ROOT)
+        source = self.home / "cli-input.csv"
+        source.write_text("feature,target\n1,2\n3,4\n", encoding="utf-8")
+
+        def cli(*args):
+            result = subprocess.run(
+                [sys.executable, "-m", "cortex.cli", *args],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            return json.loads(result.stdout)
+
+        dataset = cli("dataset", "create", "--name", "generic-cli", "--type", "tabular", "--owner", "alice", "--team", "ml")
+        version = cli(
+            "dataset",
+            "version",
+            "import",
+            dataset["id"],
+            "--version",
+            "v1",
+            "--source",
+            str(source),
+            "--format",
+            "csv",
+            "--created-by",
+            "alice",
+        )
+
+        self.assertEqual(version["rowCount"], 2)
+        self.assertEqual(version["profile"]["rows"], 2)
+        self.assertEqual(version["schema"]["columns"][0]["name"], "feature")
+
     def test_api_completes_full_loop(self):
         env = os.environ.copy()
         env["CORTEX_HOME"] = str(self.home)
@@ -654,6 +739,39 @@ class Phase1StoriesTest(unittest.TestCase):
             self.assertEqual(project_jobs[0]["id"], job["id"])
             self.assertEqual(project_runs[0]["platform"]["projectId"], project["id"])
             self.assertEqual(catalog[0]["id"], dataset["id"])
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
+    def test_api_imports_local_dataset_version(self):
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8770"
+        env["PYTHONPATH"] = str(ROOT)
+        source = self.home / "api-input.csv"
+        source.write_text("feature,target\n1,2\n3,4\n", encoding="utf-8")
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8770/healthz")
+            dataset = self._api_post(
+                "http://127.0.0.1:8770/api/v1/datasets",
+                {"name": "generic-api", "type": "tabular", "owner": "alice", "team": "ml"},
+            )
+            version = self._api_post(
+                f"http://127.0.0.1:8770/api/v1/datasets/{dataset['id']}/versions:import",
+                {"version": "v1", "source": str(source), "format": "csv", "createdBy": "alice"},
+            )
+
+            self.assertEqual(version["rowCount"], 2)
+            self.assertEqual(version["profile"]["rows"], 2)
+            self.assertEqual(version["schema"]["columns"][0]["name"], "feature")
         finally:
             server.send_signal(signal.SIGINT)
             server.wait(timeout=5)

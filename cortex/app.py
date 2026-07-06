@@ -11,6 +11,7 @@ import traceback
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from sqlite3 import IntegrityError
 from uuid import uuid4
 
 from .db import connect, decode_row, dump, load
@@ -80,6 +81,7 @@ def public_version(row: dict) -> dict:
         "checksum": row["checksum"],
         "checksumStatus": row["checksum_status"],
         "split": load(row["split_json"]),
+        "profile": load(row["profile_json"]),
         "trainable": bool(row["trainable"]),
         "approvalStatus": row["approval_status"],
         "createdBy": row["created_by"],
@@ -415,6 +417,7 @@ class CortexApp:
         checksum: str | None = None,
         schema: dict | None = None,
         split: dict | None = None,
+        profile: dict | None = None,
         created_by: str = "unknown",
     ) -> dict:
         dataset = self.get_dataset(dataset_id)
@@ -423,19 +426,159 @@ class CortexApp:
         actual_checksum = self.storage.checksum(storage_uri, data_format)
         if checksum and checksum != actual_checksum:
             raise ValueError("CHECKSUM_MISMATCH")
+        version_profile = profile or {}
+        row_count = version_profile.get("rows")
+        sample_count = version_profile.get("sampleCount")
         version_id = f"dv_{uuid4().hex[:12]}"
         self.conn.execute(
             """
             INSERT INTO dataset_versions(
               id, dataset_id, version, storage_uri, format, schema_json, checksum,
-              checksum_status, split_json, trainable, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified', ?, 1, ?, ?)
+              checksum_status, split_json, profile_json, row_count, sample_count,
+              trainable, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, 1, ?, ?)
             """,
-            (version_id, dataset_id, version, storage_uri, data_format, dump(schema or {}), actual_checksum, dump(split or {}), created_by, now()),
+            (
+                version_id,
+                dataset_id,
+                version,
+                storage_uri,
+                data_format,
+                dump(schema or {}),
+                actual_checksum,
+                dump(split or {}),
+                dump(version_profile),
+                row_count,
+                sample_count,
+                created_by,
+                now(),
+            ),
         )
         self.audit(created_by, dataset["team"], "dataset.version.add", "dataset_version", version_id, {"datasetId": dataset_id, "version": version})
         self.conn.commit()
         return self.get_dataset_version(dataset_id, version)
+
+    def import_dataset_version(
+        self,
+        dataset_id: str,
+        version: str,
+        source: str | Path,
+        data_format: str = "csv",
+        created_by: str = "unknown",
+    ) -> dict:
+        source_path = Path(source).expanduser()
+        if not source_path.is_file():
+            raise ValueError("LOCAL_SOURCE_NOT_FOUND")
+        if data_format != "csv":
+            raise ValueError("DATASET_IMPORT_FORMAT_UNSUPPORTED")
+        schema, profile = self._profile_csv(source_path)
+        storage_uri = f"s3://datasets/{dataset_id}/{version}/data.csv"
+        self.storage.put_file(storage_uri, source_path)
+        try:
+            return self.add_dataset_version(
+                dataset_id,
+                version,
+                storage_uri,
+                data_format,
+                schema=schema,
+                profile=profile,
+                created_by=created_by,
+            )
+        except IntegrityError as exc:
+            raise ValueError("DATASET_VERSION_ALREADY_EXISTS") from exc
+
+    def _profile_csv(self, path: Path) -> tuple[dict, dict]:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            columns = reader.fieldnames or []
+            stats = {
+                column: {
+                    "missing": 0,
+                    "non_null": 0,
+                    "numbers": [],
+                    "integers": True,
+                    "datetime_values": [],
+                    "datetime_parse_failures": 0,
+                    "strings": 0,
+                }
+                for column in columns
+            }
+            row_count = 0
+            for row in reader:
+                row_count += 1
+                for column in columns:
+                    value = (row.get(column) or "").strip()
+                    col_stats = stats[column]
+                    if value == "":
+                        col_stats["missing"] += 1
+                        continue
+                    col_stats["non_null"] += 1
+                    try:
+                        numeric = float(value)
+                        col_stats["numbers"].append(numeric)
+                        if not self._looks_like_int(value):
+                            col_stats["integers"] = False
+                    except ValueError:
+                        col_stats["strings"] += 1
+                    parsed = self._parse_datetime_like(value)
+                    if parsed is None:
+                        col_stats["datetime_parse_failures"] += 1
+                    else:
+                        col_stats["datetime_values"].append(parsed)
+
+        schema_columns = []
+        missing_values = {}
+        numeric = {}
+        datetime_like = {}
+        for column in columns:
+            col_stats = stats[column]
+            missing_values[column] = col_stats["missing"]
+            inferred = self._infer_column_type(col_stats)
+            schema_columns.append({"name": column, "type": inferred, "nullable": col_stats["missing"] > 0})
+            if inferred in {"integer", "number"}:
+                values = col_stats["numbers"]
+                numeric[column] = {"min": min(values), "max": max(values)}
+            if inferred == "datetime_like":
+                values = col_stats["datetime_values"]
+                datetime_like[column] = {"min": min(values).isoformat(), "max": max(values).isoformat()}
+
+        schema = {"columns": schema_columns}
+        profile = {
+            "rows": row_count,
+            "columns": len(columns),
+            "sampleCount": row_count,
+            "missingValues": missing_values,
+            "numeric": numeric,
+            "datetimeLike": datetime_like,
+        }
+        return schema, profile
+
+    def _infer_column_type(self, col_stats: dict) -> str:
+        non_null = col_stats["non_null"]
+        if non_null == 0:
+            return "empty"
+        if len(col_stats["numbers"]) == non_null:
+            return "integer" if col_stats["integers"] else "number"
+        if len(col_stats["datetime_values"]) == non_null:
+            return "datetime_like"
+        if col_stats["strings"]:
+            return "string"
+        return "unknown"
+
+    def _looks_like_int(self, value: str) -> bool:
+        text = value.strip()
+        if text.startswith(("+", "-")):
+            text = text[1:]
+        return text.isdigit()
+
+    def _parse_datetime_like(self, value: str) -> datetime | None:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
     def get_dataset_version(self, dataset_id: str, version: str) -> dict:
         row = decode_row(

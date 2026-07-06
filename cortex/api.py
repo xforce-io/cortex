@@ -192,6 +192,17 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("team", "unknown"),
                     ),
                 )
+            elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 5 and parts[4] == "versions:import":
+                self._json(
+                    201,
+                    self.app.import_dataset_version(
+                        parts[3],
+                        body.get("version", "v1"),
+                        body["source"],
+                        body.get("format", "csv"),
+                        body.get("createdBy", body.get("owner", "unknown")),
+                    ),
+                )
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 5 and parts[4] == "versions":
                 self._json(
                     201,
@@ -200,10 +211,10 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("version", "v1"),
                         body["storageUri"],
                         body["format"],
-                        body.get("checksum"),
-                        body.get("schema", {}),
-                        body.get("split", {}),
-                        body.get("createdBy", body.get("owner", "unknown")),
+                        checksum=body.get("checksum"),
+                        schema=body.get("schema", {}),
+                        split=body.get("split", {}),
+                        created_by=body.get("createdBy", body.get("owner", "unknown")),
                     ),
                 )
             elif parts == ["api", "v1", "training", "jobs"]:
