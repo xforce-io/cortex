@@ -1489,6 +1489,7 @@ class CortexApp:
         runs = self.list_runs(project_id=project_id)
         models = self.list_models(project_id=project_id)
         evaluations = self.list_evaluations(project_id=project_id)
+        experiment_results = self.list_experiment_results()
         succeeded = sum(1 for job in jobs if job["status"] == "succeeded")
         failed = sum(1 for job in jobs if job["status"] == "failed")
         return {
@@ -1502,6 +1503,7 @@ class CortexApp:
                 "runs": len(runs),
                 "models": len(models),
                 "evaluations": len(evaluations),
+                "experimentResults": len(experiment_results),
                 "succeededJobs": succeeded,
                 "failedJobs": failed,
             },
@@ -1510,6 +1512,7 @@ class CortexApp:
             "runs": runs,
             "models": models,
             "evaluations": evaluations,
+            "experimentResults": experiment_results,
             "templates": self.list_templates(),
         }
 

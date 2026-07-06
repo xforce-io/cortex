@@ -707,6 +707,9 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertAlmostEqual(result["metrics"]["rmse"], 1.0)
         self.assertIn("mape", result["metrics"])
         self.assertTrue(result["artifactUri"].startswith("s3://experiment-results/"))
+        dashboard = self.app.dashboard()
+        self.assertEqual(dashboard["summary"]["experimentResults"], 1)
+        self.assertEqual(dashboard["experimentResults"][0]["id"], result["id"])
 
     def test_import_prediction_result_rejects_missing_arrays(self):
         import numpy as np
@@ -1027,6 +1030,8 @@ class Phase1StoriesTest(unittest.TestCase):
             self.assertIn('id="jobDetail"', index)
             self.assertIn('id="runDetail"', index)
             self.assertIn('id="modelDetail"', index)
+            self.assertIn('data-view="results"', index)
+            self.assertIn('id="resultDetail"', index)
             self.assertIn('id="evaluationDetail"', index)
             self.assertIn('id="newJobButton"', index)
             self.assertIn('id="trainingJobForm"', index)

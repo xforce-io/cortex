@@ -21,6 +21,7 @@
           <button class="nav-item" data-view="datasets">Datasets</button>
           <button class="nav-item" data-view="training">Training</button>
           <button class="nav-item" data-view="runs">Experiments</button>
+          <button class="nav-item" data-view="results">Results</button>
           <button class="nav-item" data-view="models">Models</button>
           <button class="nav-item" data-view="tests">Evaluations</button>
         </nav>
@@ -75,6 +76,10 @@
               <button class="metric metric-link" data-view-target="tests" type="button">
                 <span>Tests</span>
                 <strong id="metricTests">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="results" type="button">
+                <span>Results</span>
+                <strong id="metricResults">0</strong>
               </button>
             </section>
 
@@ -230,6 +235,22 @@
             </table>
           </div>
           <section class="resource-detail" id="modelDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="results" class="table-view">
+          <div class="section-header">
+            <h2>Results</h2>
+            <span id="resultCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Rank</th><th>Method</th><th>Kind</th><th>RMSE</th><th>MAE</th><th>R2</th><th>MAPE</th><th>CV</th></tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="resultDetail" aria-live="polite"></section>
         </section>
 
         <section id="tests" class="table-view">
