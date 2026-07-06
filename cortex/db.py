@@ -170,6 +170,17 @@ def migrate(conn: sqlite3.Connection) -> None:
           team TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS experiment_results (
+          id TEXT PRIMARY KEY,
+          experiment_name TEXT NOT NULL,
+          method_id TEXT NOT NULL,
+          method_kind TEXT NOT NULL,
+          dataset_ref TEXT NOT NULL DEFAULT '',
+          metrics TEXT NOT NULL,
+          artifact_uri TEXT NOT NULL,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS audits (
           id TEXT PRIMARY KEY,
           actor TEXT NOT NULL,

@@ -687,6 +687,74 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(version["profile"]["rows"], 2)
         self.assertEqual(version["schema"]["columns"][0]["name"], "feature")
 
+    def test_import_prediction_result_computes_metrics(self):
+        import numpy as np
+
+        source = self.home / "predictions.npz"
+        np.savez(source, y_true=np.array([10.0, 20.0, 30.0]), y_pred=np.array([11.0, 19.0, 29.0]))
+
+        result = self.app.import_prediction_result(
+            "generic-sequence",
+            "method-a",
+            "sequence",
+            source,
+            created_by="alice",
+        )
+
+        self.assertEqual(result["experimentName"], "generic-sequence")
+        self.assertEqual(result["methodId"], "method-a")
+        self.assertEqual(result["metrics"]["rows"], 3)
+        self.assertAlmostEqual(result["metrics"]["rmse"], 1.0)
+        self.assertIn("mape", result["metrics"])
+        self.assertTrue(result["artifactUri"].startswith("s3://experiment-results/"))
+
+    def test_import_prediction_result_rejects_missing_arrays(self):
+        import numpy as np
+
+        source = self.home / "bad-predictions.npz"
+        np.savez(source, y_true=np.array([1.0, 2.0]))
+
+        with self.assertRaisesRegex(ValueError, "PREDICTION_ARRAYS_REQUIRED"):
+            self.app.import_prediction_result("generic-sequence", "method-a", "sequence", source, created_by="alice")
+
+    def test_cli_imports_prediction_result(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["PYTHONPATH"] = str(ROOT)
+        source = self.home / "cli-predictions.npz"
+        np.savez(source, y_true=np.array([5.0, 6.0]), y_pred=np.array([4.0, 7.0]))
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cortex.cli",
+                "experiment-result",
+                "import-predictions",
+                "--experiment",
+                "generic-sequence",
+                "--method-id",
+                "method-a",
+                "--method-kind",
+                "sequence",
+                "--source",
+                str(source),
+                "--created-by",
+                "alice",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+
+        self.assertEqual(payload["metrics"]["rows"], 2)
+        self.assertEqual(payload["methodId"], "method-a")
+
     def test_api_completes_full_loop(self):
         env = os.environ.copy()
         env["CORTEX_HOME"] = str(self.home)
@@ -824,6 +892,42 @@ class Phase1StoriesTest(unittest.TestCase):
             self.assertEqual(project_jobs[0]["id"], job["id"])
             self.assertEqual(project_runs[0]["platform"]["projectId"], project["id"])
             self.assertEqual(catalog[0]["id"], dataset["id"])
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
+    def test_api_imports_prediction_result(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8771"
+        env["PYTHONPATH"] = str(ROOT)
+        source = self.home / "api-predictions.npz"
+        np.savez(source, y_true=np.array([10.0, 20.0]), y_pred=np.array([8.0, 21.0]))
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8771/healthz")
+            result = self._api_post(
+                "http://127.0.0.1:8771/api/v1/experiment-results:import-predictions",
+                {
+                    "experimentName": "generic-sequence",
+                    "methodId": "method-a",
+                    "methodKind": "sequence",
+                    "source": str(source),
+                    "createdBy": "alice",
+                },
+            )
+
+            self.assertEqual(result["metrics"]["rows"], 2)
+            self.assertEqual(result["methodId"], "method-a")
         finally:
             server.send_signal(signal.SIGINT)
             server.wait(timeout=5)

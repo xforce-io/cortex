@@ -139,6 +139,20 @@ def public_evaluation(row: dict) -> dict:
     }
 
 
+def public_experiment_result(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "experimentName": row["experiment_name"],
+        "methodId": row["method_id"],
+        "methodKind": row["method_kind"],
+        "datasetRef": row["dataset_ref"],
+        "metrics": load(row["metrics"]),
+        "artifactUri": row["artifact_uri"],
+        "createdBy": row["created_by"],
+        "createdAt": row["created_at"],
+    }
+
+
 EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor", "statsmodels-mstl"}
 
 
@@ -1370,6 +1384,62 @@ class CortexApp:
         else:
             rows = self.conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC").fetchall()
         return [public_evaluation(decode_row(row)) for row in rows]
+
+    def import_prediction_result(
+        self,
+        experiment_name: str,
+        method_id: str,
+        method_kind: str,
+        source: str | Path,
+        created_by: str = "unknown",
+        dataset_ref: str = "",
+    ) -> dict:
+        source_path = Path(source).expanduser()
+        if not source_path.is_file():
+            raise ValueError("LOCAL_SOURCE_NOT_FOUND")
+        if source_path.suffix.lower() != ".npz":
+            raise ValueError("PREDICTION_RESULT_FORMAT_UNSUPPORTED")
+        if not importlib.util.find_spec("numpy"):
+            raise ValueError("NUMPY_NOT_AVAILABLE")
+        import numpy as np
+
+        try:
+            payload = np.load(source_path)
+        except Exception as exc:
+            raise ValueError("PREDICTION_RESULT_INVALID") from exc
+        if "y_true" not in payload.files or "y_pred" not in payload.files:
+            raise ValueError("PREDICTION_ARRAYS_REQUIRED")
+        y_true = [float(item) for item in payload["y_true"].reshape(-1).tolist()]
+        y_pred = [float(item) for item in payload["y_pred"].reshape(-1).tolist()]
+        if not y_true or len(y_true) != len(y_pred):
+            raise ValueError("PREDICTION_ARRAYS_INVALID")
+        metrics = self._regression_metrics(y_true, y_pred)
+        metrics["rows"] = len(y_true)
+        result_id = f"er_{uuid4().hex[:12]}"
+        artifact_uri = f"s3://experiment-results/{result_id}/predictions.npz"
+        self.storage.put_file(artifact_uri, source_path)
+        self.conn.execute(
+            """
+            INSERT INTO experiment_results(
+              id, experiment_name, method_id, method_kind, dataset_ref,
+              metrics, artifact_uri, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (result_id, experiment_name, method_id, method_kind, dataset_ref, dump(metrics), artifact_uri, created_by, now()),
+        )
+        self.audit(created_by, "unknown", "experiment_result.import", "experiment_result", result_id, {"experimentName": experiment_name, "methodId": method_id})
+        self.conn.commit()
+        return self.get_experiment_result(result_id)
+
+    def get_experiment_result(self, result_id: str) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM experiment_results WHERE id = ?", (result_id,)).fetchone())
+        if not row:
+            raise ValueError("EXPERIMENT_RESULT_NOT_FOUND")
+        return public_experiment_result(row)
+
+    def list_experiment_results(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM experiment_results ORDER BY created_at DESC").fetchall()
+        return [public_experiment_result(decode_row(row)) for row in rows]
 
     def list_alias_audits(self, name: str) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM model_alias_audits WHERE registered_model_name = ? ORDER BY created_at", (name,)).fetchall()
