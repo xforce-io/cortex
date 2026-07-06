@@ -578,6 +578,12 @@ label span {
   margin-bottom: 10px;
 }
 
+.scope-hint {
+  margin: -4px 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .selectable-row {
   cursor: pointer;
 }

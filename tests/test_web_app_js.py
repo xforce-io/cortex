@@ -247,6 +247,8 @@ assert.match(html, /DatasetVersion/);
 assert.match(html, /data-preview-dataset-version="v1"/);
 assert.match(html, /data-use-dataset-version="ds_customer_features@v1"/);
 assert.match(html, /data-unlink-project-dataset="ds_customer_features"/);
+assert.match(html, /归档全局数据集/);
+assert.match(html, /归档会影响所有项目/);
 assert.doesNotMatch(html, /Delete dataset/);
 assert.match(html, /customer_id/);
 assert.match(html, /c_001/);
@@ -299,6 +301,8 @@ assert.match(detailHtml, /catalog-features/);
 assert.match(detailHtml, /Global catalog dataset/);
 assert.match(detailHtml, /DatasetVersion v1/);
 assert.match(detailHtml, /data-preview-dataset-version="v1"/);
+assert.match(detailHtml, /归档全局数据集/);
+assert.match(detailHtml, /全局资产级逻辑删除/);
 assert.doesNotMatch(detailHtml, /data-unlink-project-dataset/);
 """
         )

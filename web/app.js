@@ -49,7 +49,7 @@ const LOCALE_STORAGE_KEY = "cortex.locale";
 const I18N = {
   "zh-CN": {
     "action.cancel": "取消",
-    "action.archiveDataset": "归档数据集",
+    "action.archiveDataset": "归档全局数据集",
     "action.createExample": "创建示例工作区",
     "action.creatingExample": "正在创建示例工作区",
     "action.editMetadata": "保存元数据",
@@ -145,6 +145,8 @@ const I18N = {
     "form.noExecutableTemplates": "这个 API 响应里没有可执行模板。请刷新页面或重启本地服务。",
     "form.registeredFrom": "注册自 {id}",
     "form.submittingJob": "正在提交任务",
+    "hint.archiveDataset": "归档是全局资产级逻辑删除：默认列表隐藏并禁止新训练，不删除数据集版本、项目引用或历史血缘。",
+    "hint.archiveProjectDataset": "归档会影响所有项目；如果只是不想在当前项目使用，请选择“从项目移除”。",
     "health.checking": "检查中",
     "health.healthy": "健康",
     "health.unavailable": "不可用",
@@ -202,7 +204,7 @@ const I18N = {
   },
   en: {
     "action.cancel": "Cancel",
-    "action.archiveDataset": "Archive dataset",
+    "action.archiveDataset": "Archive global dataset",
     "action.createExample": "Create example workspace",
     "action.creatingExample": "Creating example workspace",
     "action.editMetadata": "Save metadata",
@@ -298,6 +300,8 @@ const I18N = {
     "form.noExecutableTemplates": "No executable templates in this API response. Refresh the page or restart the local service.",
     "form.registeredFrom": "Registered from {id}",
     "form.submittingJob": "Submitting job",
+    "hint.archiveDataset": "Archive is a global soft-delete action: it hides the dataset from default lists and blocks new training without deleting dataset versions, project links, or historical lineage.",
+    "hint.archiveProjectDataset": "Archiving affects every project; use Remove from project when you only want to unlink it here.",
     "health.checking": "Checking",
     "health.healthy": "Healthy",
     "health.unavailable": "Unavailable",
@@ -1024,6 +1028,9 @@ function datasetDetailBody(dataset) {
   const unlinkAction = state.currentProjectId && dataset.projectLink
     ? `<button class="secondary-button" data-unlink-project-dataset="${escapeHtml(dataset.id)}">${t("action.removeFromProject")}</button>`
     : "";
+  const archiveHint = dataset.status === "archived"
+    ? ""
+    : `<p class="scope-hint">${t(dataset.projectLink ? "hint.archiveProjectDataset" : "hint.archiveDataset")}</p>`;
   const metadataForm = `
     <section class="inline-form compact-form">
       <form data-dataset-metadata-form="${escapeHtml(dataset.id)}">
@@ -1086,7 +1093,7 @@ function datasetDetailBody(dataset) {
         ["Pinned version", escapeHtml(dataset.projectLink.pinnedVersion || t("common.empty"))],
       ])
     : `<p class="muted">${state.currentProjectId ? t("common.empty") : "Workspace catalog"}</p>`;
-  return `<div class="detail-actions">${archiveAction}${unlinkAction}</div>` +
+  return `<div class="detail-actions">${archiveAction}${unlinkAction}</div>${archiveHint}` +
       `<h4>${t("section.metadata")}</h4>` +
       metadataForm +
       detailList([
