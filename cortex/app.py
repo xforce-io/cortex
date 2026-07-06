@@ -1104,8 +1104,16 @@ class CortexApp:
         residual = sum(error * error for error in errors)
         r2 = 1 - residual / total if total else 1.0
         rmse = mse**0.5
-        non_zero = [(target, prediction) for target, prediction in zip(targets, predictions) if target != 0]
-        mape = sum(abs((prediction - target) / target) for target, prediction in non_zero) / len(non_zero) * 100 if non_zero else 0.0
+        mape_items = [
+            (target, prediction)
+            for target, prediction in zip(targets, predictions)
+            if abs(target) > 1.0
+        ]
+        mape = (
+            sum(abs((prediction - target) / target) for target, prediction in mape_items) / len(mape_items) * 100
+            if mape_items
+            else 0.0
+        )
         cv = rmse / abs(mean_target) * 100 if mean_target else 0.0
         return {"mae": round(mae, 6), "rmse": round(rmse, 6), "r2": round(r2, 6), "mape": round(mape, 6), "cv": round(cv, 6)}
 
