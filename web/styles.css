@@ -30,6 +30,10 @@ button {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
@@ -87,6 +91,10 @@ button {
 .nav-list {
   display: grid;
   gap: 4px;
+}
+
+.workspace-mode .nav-list {
+  display: none;
 }
 
 .nav-item {

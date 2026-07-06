@@ -149,6 +149,8 @@ function render() {
   const { summary, datasets, jobs, runs, models } = state.dashboard;
   const inProject = Boolean(state.currentProjectId);
   ensureSelections();
+  document.body.classList.toggle("project-mode", inProject);
+  document.body.classList.toggle("workspace-mode", !inProject);
   renderProjectCards();
   $("#projectLanding").hidden = inProject;
   $("#projectWorkspace").hidden = !inProject;
@@ -926,7 +928,7 @@ function applyView(view) {
     tests: "Evaluations",
   };
   const project = state.dashboard?.project;
-  document.querySelector("h1").textContent = project ? project.name : "Workspace";
+  document.querySelector("h1").textContent = project ? project.name : "Projects";
   const selectedByView = {
     datasets: ["dataset", state.selected.dataset],
     training: ["job", state.selected.job],
