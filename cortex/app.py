@@ -403,9 +403,8 @@ class CortexApp:
         if dataset_type:
             clauses.append("type = ?")
             params.append(dataset_type)
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
+        clauses.append("status = ?")
+        params.append(status or "active")
         sql = "SELECT * FROM datasets"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -421,6 +420,66 @@ class CortexApp:
             dataset["latestVersion"] = versions[0]["version"] if versions else ""
             datasets.append(dataset)
         return datasets
+
+    def update_dataset(self, dataset_id: str, updates: dict, actor: str = "unknown") -> dict:
+        current = self.get_dataset(dataset_id)
+        allowed = {
+            "name": "name",
+            "description": "description",
+            "tags": "tags",
+            "domain": "domain",
+            "sourceSystem": "source_system",
+            "source_system": "source_system",
+            "visibility": "visibility",
+        }
+        assignments = []
+        params = []
+        for key, column in allowed.items():
+            if key not in updates:
+                continue
+            value = updates[key]
+            if column == "tags":
+                if not isinstance(value, list):
+                    raise ValueError("DATASET_TAGS_INVALID")
+                value = dump([str(item) for item in value])
+            assignments.append(f"{column} = ?")
+            params.append(value)
+        if not assignments:
+            return current
+        assignments.append("updated_at = ?")
+        params.append(now())
+        params.append(dataset_id)
+        try:
+            self.conn.execute(f"UPDATE datasets SET {', '.join(assignments)} WHERE id = ?", params)
+        except IntegrityError as exc:
+            raise ValueError("DATASET_NAME_ALREADY_EXISTS") from exc
+        self.audit(actor, current["team"], "dataset.update", "dataset", dataset_id, {"fields": sorted(key for key in updates if key in allowed)})
+        self.conn.commit()
+        return self.get_dataset(dataset_id)
+
+    def archive_dataset(self, dataset_id: str, actor: str = "unknown") -> dict:
+        dataset = self.get_dataset(dataset_id)
+        ts = now()
+        self.conn.execute("UPDATE datasets SET status = 'archived', updated_at = ? WHERE id = ?", (ts, dataset_id))
+        self.audit(actor, dataset["team"], "dataset.archive", "dataset", dataset_id, {})
+        self.conn.commit()
+        return self.get_dataset(dataset_id)
+
+    def restore_dataset(self, dataset_id: str, actor: str = "unknown") -> dict:
+        dataset = self.get_dataset(dataset_id)
+        ts = now()
+        self.conn.execute("UPDATE datasets SET status = 'active', updated_at = ? WHERE id = ?", (ts, dataset_id))
+        self.audit(actor, dataset["team"], "dataset.restore", "dataset", dataset_id, {})
+        self.conn.commit()
+        return self.get_dataset(dataset_id)
+
+    def unlink_project_dataset(self, project_id: str, dataset_id: str, actor: str = "unknown") -> dict:
+        project = self.get_project(project_id)
+        link = self.get_project_dataset_link(project_id, dataset_id)
+        self.conn.execute("DELETE FROM project_dataset_links WHERE project_id = ? AND dataset_id = ?", (project_id, dataset_id))
+        self.audit(actor, project["team"], "project.dataset.unlink", "dataset", dataset_id, {"projectId": project_id})
+        self.conn.commit()
+        return link
 
     def add_dataset_version(
         self,
@@ -610,6 +669,34 @@ class CortexApp:
         rows = self.conn.execute("SELECT * FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC", (dataset_id,)).fetchall()
         return [public_version(decode_row(row)) for row in rows]
 
+    def preview_dataset_version(self, dataset_id: str, version: str, limit: int = 50) -> dict:
+        dataset_version = self.get_dataset_version(dataset_id, version)
+        if dataset_version["format"] != "csv":
+            raise ValueError("DATASET_PREVIEW_UNSUPPORTED_FORMAT")
+        bounded_limit = max(1, min(int(limit or 50), 200))
+        path = self.storage.path_for(dataset_version["storageUri"])
+        rows = []
+        truncated = False
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for index, row in enumerate(reader):
+                if index >= bounded_limit:
+                    truncated = True
+                    break
+                rows.append(dict(row))
+        return {
+            "datasetId": dataset_id,
+            "version": version,
+            "format": dataset_version["format"],
+            "storageUri": dataset_version["storageUri"],
+            "checksum": dataset_version["checksum"],
+            "schema": dataset_version["schema"],
+            "profile": dataset_version["profile"],
+            "rows": rows,
+            "limit": bounded_limit,
+            "truncated": truncated,
+        }
+
     def parse_dataset_ref(self, dataset_ref: str) -> dict:
         if "@" not in dataset_ref:
             raise ValueError("DATASET_REF_INVALID")
@@ -683,6 +770,8 @@ class CortexApp:
         if not version["trainable"] or version["checksumStatus"] != "verified":
             raise ValueError("DATASET_NOT_TRAINABLE")
         dataset = self.get_dataset(version["datasetId"])
+        if dataset["status"] == "archived":
+            raise ValueError("DATASET_ARCHIVED")
         if dataset["type"] not in load(template["dataset_types"]):
             raise ValueError("TEMPLATE_DATASET_TYPE_MISMATCH")
         job_id = f"job_{uuid4().hex[:12]}"
