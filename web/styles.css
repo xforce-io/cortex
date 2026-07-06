@@ -231,6 +231,11 @@ h2 {
   font-weight: 650;
 }
 
+.danger-button {
+  border-color: #efb0b0;
+  color: var(--bad);
+}
+
 .primary-button:disabled {
   opacity: 0.65;
   cursor: wait;
@@ -560,6 +565,25 @@ label span {
   gap: 6px;
 }
 
+.horizontal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.scope-hint {
+  margin: -4px 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .selectable-row {
   cursor: pointer;
 }
@@ -591,6 +615,10 @@ table {
   width: 100%;
   border-collapse: collapse;
   min-width: 680px;
+}
+
+.compact-table table {
+  min-width: 560px;
 }
 
 th,
@@ -698,6 +726,11 @@ td {
   border-radius: 6px;
   padding: 10px;
   white-space: pre-wrap;
+}
+
+.preview-panel {
+  display: grid;
+  gap: 8px;
 }
 
 .detail-list {

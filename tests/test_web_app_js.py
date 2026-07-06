@@ -56,7 +56,14 @@ function elementFor(selector) {
 }
 
 global.window = { location: { protocol: "http:", origin: "http://127.0.0.1:8768" } };
+global.localStorage = {
+  getItem() {
+    return null;
+  },
+  setItem() {},
+};
 global.document = {
+  documentElement: createElement("html"),
   body: createElement("body"),
   querySelector: elementFor,
   querySelectorAll() {
@@ -170,5 +177,180 @@ assert.strictEqual(findDatasetVersionTarget("dv_missing"), null);
 renderJobDetail();
 assert.match(elementFor("#jobDetail").innerHTML, /<span class="mono">dv_missing<\/span>/);
 assert.doesNotMatch(elementFor("#jobDetail").innerHTML, /data-jump-dataset-version/);
+"""
+        )
+
+    def test_dataset_detail_surfaces_version_preview_and_project_unlink_scope(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = "proj_default";
+state.dashboard = {
+  project: { id: "proj_default", name: "Default" },
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  datasets: [
+    {
+      id: "ds_customer_features",
+      name: "customer-features",
+      description: "Reusable customer features",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      domain: "crm",
+      sourceSystem: "warehouse",
+      visibility: "team",
+      tags: ["golden"],
+      status: "active",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+      projectLink: { id: "pdl_1", role: "train", versionPolicy: "latest", pinnedVersion: null },
+    },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.selected.dataset = "ds_customer_features";
+state.details["dataset:ds_customer_features"] = {
+  versions: [
+    {
+      id: "dv_customer_v1",
+      datasetId: "ds_customer_features",
+      version: "v1",
+      format: "csv",
+      storageUri: "s3://datasets/customer-features/v1/data.csv",
+      rowCount: 2,
+      checksumStatus: "verified",
+      trainable: true,
+      approvalStatus: "approved",
+      schema: { columns: [{ name: "customer_id", type: "string" }] },
+    },
+  ],
+  lineage: [],
+  selectedPreview: "v1",
+  preview: {
+    "v1": {
+      rows: [{ customer_id: "c_001" }, { customer_id: "c_002" }],
+      schema: { columns: [{ name: "customer_id", type: "string" }] },
+      profile: { rows: 2, columns: 1 },
+      truncated: false,
+    },
+  },
+};
+
+renderDatasetDetail();
+const html = elementFor("#datasetDetail").innerHTML;
+assert.match(html, /DatasetVersion/);
+assert.match(html, /data-preview-dataset-version="v1"/);
+assert.match(html, /data-use-dataset-version="ds_customer_features@v1"/);
+assert.match(html, /data-unlink-project-dataset="ds_customer_features"/);
+assert.match(html, /归档全局数据集/);
+assert.match(html, /归档会影响所有项目/);
+assert.doesNotMatch(html, /Delete dataset/);
+assert.match(html, /customer_id/);
+assert.match(html, /c_001/);
+"""
+        )
+
+    def test_workspace_catalog_rows_open_dataset_metadata(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = null;
+state.dashboard = {
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  projects: [],
+  datasets: [
+    {
+      id: "ds_catalog_features",
+      name: "catalog-features",
+      description: "Global catalog dataset",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      domain: "crm",
+      sourceSystem: "warehouse",
+      visibility: "team",
+      tags: ["golden"],
+      status: "active",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+    },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.selected.dataset = "ds_catalog_features";
+state.details["dataset:ds_catalog_features"] = {
+  versions: [{ id: "dv_catalog_v1", datasetId: "ds_catalog_features", version: "v1", format: "csv", storageUri: "s3://datasets/catalog/v1/data.csv", rowCount: 2, checksumStatus: "verified", trainable: true, approvalStatus: "approved" }],
+  lineage: [],
+};
+
+renderProjectCards();
+
+assert.match(elementFor("#catalogDatasetsBody").innerHTML, /data-resource-type="dataset" data-resource-id="ds_catalog_features"/);
+const detailHtml = elementFor("#catalogDatasetDetail").innerHTML;
+assert.match(detailHtml, /catalog-features/);
+assert.match(detailHtml, /Global catalog dataset/);
+assert.match(detailHtml, /DatasetVersion v1/);
+assert.match(detailHtml, /data-preview-dataset-version="v1"/);
+assert.match(detailHtml, /归档全局数据集/);
+assert.match(detailHtml, /全局资产级逻辑删除/);
+assert.doesNotMatch(detailHtml, /data-unlink-project-dataset/);
+"""
+        )
+
+    def test_use_dataset_version_selects_compatible_training_template(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = "proj_default";
+state.dashboard = {
+  project: { id: "proj_default", name: "Default" },
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  datasets: [
+    {
+      id: "ds_blobs",
+      name: "blobs",
+      description: "Training data",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      domain: "",
+      sourceSystem: "",
+      visibility: "team",
+      tags: [],
+      status: "active",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+    },
+  ],
+  templates: [
+    { id: "pytorch-sequence-forecast", name: "Sequence", datasetTypes: ["time_series"], executorStatus: "available", paramSchema: {} },
+    { id: "sklearn-kmeans", name: "KMeans", datasetTypes: ["tabular"], executorStatus: "available", paramSchema: {} },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.trainingForm.versions = [
+  { id: "dv_blobs_v1", datasetName: "blobs", datasetType: "tabular", datasetStatus: "active", version: "v1", ref: "ds_blobs@v1", trainable: true },
+];
+
+await useDatasetVersionForTraining("ds_blobs@v1");
+
+assert.strictEqual(elementFor("#jobTemplate").value, "sklearn-kmeans");
+assert.strictEqual(elementFor("#jobDataset").value, "ds_blobs@v1");
+assert.match(elementFor("#jobDataset").innerHTML, /blobs@v1/);
 """
         )

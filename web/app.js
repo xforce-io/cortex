@@ -49,14 +49,20 @@ const LOCALE_STORAGE_KEY = "cortex.locale";
 const I18N = {
   "zh-CN": {
     "action.cancel": "取消",
+    "action.archiveDataset": "归档全局数据集",
     "action.createExample": "创建示例工作区",
     "action.creatingExample": "正在创建示例工作区",
+    "action.editMetadata": "保存元数据",
     "action.newTrainingJob": "新建训练任务",
+    "action.preview": "预览",
     "action.refresh": "刷新",
     "action.refreshData": "刷新数据",
     "action.registerAsModel": "注册为模型",
+    "action.removeFromProject": "从项目移除",
+    "action.restoreDataset": "恢复数据集",
     "action.registerModelVersion": "注册模型版本",
     "action.submitJob": "提交任务",
+    "action.useForTraining": "用于训练",
     "action.viewTrainingResults": "查看训练结果",
     "aria.lineage": "数据集到任务、运行、模型的血缘",
     "aria.primary": "主导航",
@@ -92,6 +98,7 @@ const I18N = {
     "field.created": "创建时间",
     "field.createdBy": "创建人",
     "field.dataset": "数据集",
+    "field.datasetCatalog": "数据集目录",
     "field.datasetVersion": "数据集版本",
     "field.datasetVersionId": "数据集版本 ID",
     "field.description": "描述",
@@ -138,6 +145,8 @@ const I18N = {
     "form.noExecutableTemplates": "这个 API 响应里没有可执行模板。请刷新页面或重启本地服务。",
     "form.registeredFrom": "注册自 {id}",
     "form.submittingJob": "正在提交任务",
+    "hint.archiveDataset": "归档是全局资产级逻辑删除：默认列表隐藏并禁止新训练，不删除数据集版本、项目引用或历史血缘。",
+    "hint.archiveProjectDataset": "归档会影响所有项目；如果只是不想在当前项目使用，请选择“从项目移除”。",
     "health.checking": "检查中",
     "health.healthy": "健康",
     "health.unavailable": "不可用",
@@ -172,7 +181,10 @@ const I18N = {
     "section.inputs": "输入",
     "section.lineage": "血缘",
     "section.logs": "日志",
+    "section.metadata": "元数据",
     "section.metrics": "指标",
+    "section.preview": "预览",
+    "section.projectLink": "项目引用",
     "section.params": "参数",
     "section.runMetrics": "运行指标",
     "section.tags": "标签",
@@ -192,14 +204,20 @@ const I18N = {
   },
   en: {
     "action.cancel": "Cancel",
+    "action.archiveDataset": "Archive global dataset",
     "action.createExample": "Create example workspace",
     "action.creatingExample": "Creating example workspace",
+    "action.editMetadata": "Save metadata",
     "action.newTrainingJob": "New training job",
+    "action.preview": "Preview",
     "action.refresh": "Refresh",
     "action.refreshData": "Refresh data",
     "action.registerAsModel": "Register as model",
+    "action.removeFromProject": "Remove from project",
+    "action.restoreDataset": "Restore dataset",
     "action.registerModelVersion": "Register model version",
     "action.submitJob": "Submit job",
+    "action.useForTraining": "Use for training",
     "action.viewTrainingResults": "View training results",
     "aria.lineage": "Dataset to job to run to model lineage",
     "aria.primary": "Primary",
@@ -235,6 +253,7 @@ const I18N = {
     "field.created": "Created",
     "field.createdBy": "Created By",
     "field.dataset": "Dataset",
+    "field.datasetCatalog": "Dataset Catalog",
     "field.datasetVersion": "Dataset version",
     "field.datasetVersionId": "Dataset Version ID",
     "field.description": "Description",
@@ -281,6 +300,8 @@ const I18N = {
     "form.noExecutableTemplates": "No executable templates in this API response. Refresh the page or restart the local service.",
     "form.registeredFrom": "Registered from {id}",
     "form.submittingJob": "Submitting job",
+    "hint.archiveDataset": "Archive is a global soft-delete action: it hides the dataset from default lists and blocks new training without deleting dataset versions, project links, or historical lineage.",
+    "hint.archiveProjectDataset": "Archiving affects every project; use Remove from project when you only want to unlink it here.",
     "health.checking": "Checking",
     "health.healthy": "Healthy",
     "health.unavailable": "Unavailable",
@@ -315,7 +336,10 @@ const I18N = {
     "section.inputs": "Inputs",
     "section.lineage": "Lineage",
     "section.logs": "Logs",
+    "section.metadata": "Metadata",
     "section.metrics": "Metrics",
+    "section.preview": "Preview",
+    "section.projectLink": "Project link",
     "section.params": "Params",
     "section.runMetrics": "Run Metrics",
     "section.tags": "Tags",
@@ -603,6 +627,21 @@ function renderProjectCards() {
         })
         .join("")
     : `<p class="muted">${t("common.noProjects")}</p>`;
+  const datasets = state.dashboard?.datasets || [];
+  const catalogCount = $("#catalogDatasetCount");
+  const catalogBody = $("#catalogDatasetsBody");
+  if (catalogCount) catalogCount.textContent = t("common.records", { count: datasets.length });
+  if (catalogBody) {
+    catalogBody.innerHTML = limitedRows(
+      "datasets",
+      datasets,
+      6,
+      (dataset) =>
+        `<tr ${clickableRow("dataset", dataset.id)}><td>${escapeHtml(dataset.name)}</td><td>${escapeHtml(dataset.type)}</td><td>${dataset.versionCount || 0}</td><td>${escapeHtml(dataset.latestVersion || "")}</td><td>${escapeHtml(dataset.owner)}</td><td>${pill(dataset.status)}</td></tr>`,
+      t("table.noDatasets"),
+    );
+  }
+  renderCatalogDatasetDetail();
 }
 
 function ensureSelections() {
@@ -760,6 +799,30 @@ function renderCollection(items, emptyLabel = t("common.empty")) {
   return `<ul class="detail-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
+function renderPreviewTable(preview) {
+  if (!preview) return "";
+  const columns = preview.schema?.columns?.map((column) => column.name) || Object.keys(preview.rows?.[0] || {});
+  const rows = preview.rows || [];
+  const table = rows.length
+    ? `
+      <div class="table-wrap compact-table">
+        <table>
+          <thead><tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
+          <tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(row[column] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody>
+        </table>
+      </div>
+    `
+    : `<p class="muted">${t("common.empty")}</p>`;
+  const profile = preview.profile || {};
+  return `
+    <section class="preview-panel">
+      <h4>${t("section.preview")} · DatasetVersion ${escapeHtml(preview.version || "")}</h4>
+      <p class="muted">${escapeHtml(preview.storageUri || "")} · ${t("field.rows")} ${escapeHtml(profile.rows ?? rows.length)}${preview.truncated ? " · truncated" : ""}</p>
+      ${table}
+    </section>
+  `;
+}
+
 function modelVersionForRun(runId) {
   const models = state.dashboard?.models || [];
   for (const model of models) {
@@ -847,7 +910,7 @@ function renderTemplateOptions() {
 
 function compatibleVersions(template) {
   const datasetTypes = template?.datasetTypes || [];
-  return state.trainingForm.versions.filter((item) => item.trainable && (!datasetTypes.length || datasetTypes.includes(item.datasetType)));
+  return state.trainingForm.versions.filter((item) => item.datasetStatus !== "archived" && item.trainable && (!datasetTypes.length || datasetTypes.includes(item.datasetType)));
 }
 
 function renderDatasetOptions() {
@@ -945,6 +1008,7 @@ function setDetail(containerId, title, subtitle, body) {
 }
 
 function renderAllDetails() {
+  renderCatalogDatasetDetail();
   renderDatasetDetail();
   renderJobDetail();
   renderRunDetail();
@@ -953,34 +1017,118 @@ function renderAllDetails() {
   renderEvaluationDetail();
 }
 
+function datasetDetailBody(dataset) {
+  const extra = state.details[detailKey("dataset", dataset.id)];
+  const versions = extra?.versions || [];
+  const lineage = extra?.lineage || [];
+  const preview = extra?.selectedPreview ? extra.preview?.[extra.selectedPreview] : null;
+  const archiveAction = dataset.status === "archived"
+    ? `<button class="secondary-button" data-restore-dataset="${escapeHtml(dataset.id)}">${t("action.restoreDataset")}</button>`
+    : `<button class="secondary-button danger-button" data-archive-dataset="${escapeHtml(dataset.id)}">${t("action.archiveDataset")}</button>`;
+  const unlinkAction = state.currentProjectId && dataset.projectLink
+    ? `<button class="secondary-button" data-unlink-project-dataset="${escapeHtml(dataset.id)}">${t("action.removeFromProject")}</button>`
+    : "";
+  const archiveHint = dataset.status === "archived"
+    ? ""
+    : `<p class="scope-hint">${t(dataset.projectLink ? "hint.archiveProjectDataset" : "hint.archiveDataset")}</p>`;
+  const metadataForm = `
+    <section class="inline-form compact-form">
+      <form data-dataset-metadata-form="${escapeHtml(dataset.id)}">
+        <div class="form-grid">
+          <label><span>${t("field.name")}</span><input name="name" value="${escapeHtml(dataset.name)}" required /></label>
+          <label><span>${t("field.description")}</span><input name="description" value="${escapeHtml(dataset.description || "")}" /></label>
+          <label><span>${t("field.tags")}</span><input name="tags" value="${escapeHtml((dataset.tags || []).join(", "))}" /></label>
+          <label><span>${t("field.domain")}</span><input name="domain" value="${escapeHtml(dataset.domain || "")}" /></label>
+          <label><span>${t("field.source")}</span><input name="sourceSystem" value="${escapeHtml(dataset.sourceSystem || "")}" /></label>
+          <label>
+            <span>${t("field.visibility")}</span>
+            <select name="visibility">
+              ${["private", "team", "public"].map((value) => `<option value="${value}" ${dataset.visibility === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="form-footer">
+          <p>${t("field.id")} <span class="mono">${escapeHtml(dataset.id)}</span></p>
+          <button class="secondary-button" type="submit">${t("action.editMetadata")}</button>
+        </div>
+      </form>
+    </section>
+  `;
+  const versionTable = versions.length
+    ? `
+      <div class="table-wrap compact-table">
+        <table>
+          <thead>
+            <tr><th>${t("field.datasetVersion")}</th><th>${t("field.type")}</th><th>${t("field.rows")}</th><th>Checksum</th><th>${t("field.status")}</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            ${versions
+              .map(
+                (version) => `
+                  <tr>
+                    <td><span class="mono">DatasetVersion ${escapeHtml(version.version)}</span></td>
+                    <td>${escapeHtml(version.format)}</td>
+                    <td>${escapeHtml(version.rowCount ?? t("common.unknown"))}</td>
+                    <td>${escapeHtml(version.checksumStatus)} · ${escapeHtml(shortId(version.checksum || ""))}</td>
+                    <td>${version.trainable ? "trainable" : "disabled"} · ${escapeHtml(version.approvalStatus || "")}</td>
+                    <td>
+                      <div class="inline-actions horizontal-actions">
+                        <button class="link-button" data-preview-dataset-version="${escapeHtml(version.version)}">${t("action.preview")}</button>
+                        <button class="link-button" data-use-dataset-version="${escapeHtml(`${dataset.id}@${version.version}`)}">${t("action.useForTraining")}</button>
+                      </div>
+                    </td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : `<p class="muted">${extra ? t("common.noVersions") : t("common.loadingVersions")}</p>`;
+  const projectLink = dataset.projectLink
+    ? detailList([
+        ["Role", escapeHtml(dataset.projectLink.role)],
+        ["Version policy", escapeHtml(dataset.projectLink.versionPolicy)],
+        ["Pinned version", escapeHtml(dataset.projectLink.pinnedVersion || t("common.empty"))],
+      ])
+    : `<p class="muted">${state.currentProjectId ? t("common.empty") : "Workspace catalog"}</p>`;
+  return `<div class="detail-actions">${archiveAction}${unlinkAction}</div>${archiveHint}` +
+      `<h4>${t("section.metadata")}</h4>` +
+      metadataForm +
+      detailList([
+        [t("field.id"), `<span class="mono">${escapeHtml(dataset.id)}</span>`],
+        [t("field.type"), escapeHtml(dataset.type)],
+        [t("field.owner"), escapeHtml(dataset.owner)],
+        [t("field.team"), escapeHtml(dataset.team)],
+        [t("field.status"), pill(dataset.status)],
+        [t("field.created"), escapeHtml(dataset.createdAt)],
+        [t("field.updated"), escapeHtml(dataset.updatedAt)],
+      ]) +
+      `<h4>${t("section.versions")}</h4>${versionTable}` +
+      renderPreviewTable(preview) +
+      `<h4>${t("section.projectLink")}</h4>${projectLink}` +
+      `<h4>${t("section.lineage")}</h4>${lineage.length ? detailList(lineage.map((item) => [shortId(item.mlflowRunId), `${escapeHtml(item.jobStatus)} · ${escapeHtml(item.registeredModelName || t("common.noModel"))}${item.modelVersion ? `:${escapeHtml(item.modelVersion)}` : ""}`])) : `<p class="muted">${extra ? t("common.noDownstreamRuns") : t("common.loadingLineage")}</p>`}`;
+}
+
+function renderCatalogDatasetDetail() {
+  const container = $("#catalogDatasetDetail");
+  if (!container) return;
+  const dataset = findResource("dataset", state.selected.dataset);
+  if (!dataset) {
+    setDetail("#catalogDatasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
+    return;
+  }
+  setDetail("#catalogDatasetDetail", dataset.name, dataset.description || dataset.id, datasetDetailBody(dataset));
+}
+
 function renderDatasetDetail() {
   const dataset = findResource("dataset", state.selected.dataset);
   if (!dataset) {
     setDetail("#datasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
     return;
   }
-  const extra = state.details[detailKey("dataset", dataset.id)];
-  const versions = extra?.versions || [];
-  const lineage = extra?.lineage || [];
-  setDetail(
-    "#datasetDetail",
-    dataset.name,
-    dataset.description || dataset.id,
-    detailList([
-      [t("field.id"), `<span class="mono">${escapeHtml(dataset.id)}</span>`],
-      [t("field.type"), escapeHtml(dataset.type)],
-      [t("field.owner"), escapeHtml(dataset.owner)],
-      [t("field.team"), escapeHtml(dataset.team)],
-      [t("field.domain"), escapeHtml(dataset.domain || t("common.empty"))],
-      [t("field.source"), escapeHtml(dataset.sourceSystem || t("common.empty"))],
-      [t("field.visibility"), escapeHtml(dataset.visibility)],
-      [t("field.tags"), escapeHtml((dataset.tags || []).join(", ") || t("common.empty"))],
-      [t("field.created"), escapeHtml(dataset.createdAt)],
-      [t("field.updated"), escapeHtml(dataset.updatedAt)],
-    ]) +
-      `<h4>${t("section.versions")}</h4>${versions.length ? detailList(versions.map((version) => [`${version.version} · ${version.format}`, `${escapeHtml(version.storageUri)} · ${t("field.rows")} ${escapeHtml(version.rowCount ?? t("common.unknown"))} · ${escapeHtml(version.checksumStatus)}`])) : `<p class="muted">${extra ? t("common.noVersions") : t("common.loadingVersions")}</p>`}` +
-      `<h4>${t("section.lineage")}</h4>${lineage.length ? detailList(lineage.map((item) => [shortId(item.mlflowRunId), `${escapeHtml(item.jobStatus)} · ${escapeHtml(item.registeredModelName || t("common.noModel"))}${item.modelVersion ? `:${escapeHtml(item.modelVersion)}` : ""}`])) : `<p class="muted">${extra ? t("common.noDownstreamRuns") : t("common.loadingLineage")}</p>`}`,
-  );
+  setDetail("#datasetDetail", dataset.name, dataset.description || dataset.id, datasetDetailBody(dataset));
 }
 
 function renderJobDetail() {
@@ -1271,6 +1419,7 @@ async function loadTrainingVersions() {
           ...version,
           datasetName: dataset.name,
           datasetType: dataset.type,
+          datasetStatus: dataset.status,
           ref: `${dataset.id}@${version.version}`,
         }));
       }),
@@ -1335,6 +1484,35 @@ async function submitTrainingJob(event) {
   }
 }
 
+async function submitDatasetMetadata(event) {
+  const form = event.target.closest("[data-dataset-metadata-form]");
+  if (!form) return;
+  event.preventDefault();
+  const datasetId = form.dataset.datasetMetadataForm;
+  const data = new FormData(form);
+  const tags = String(data.get("tags") || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const updated = await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: data.get("name"),
+      description: data.get("description"),
+      tags,
+      domain: data.get("domain"),
+      sourceSystem: data.get("sourceSystem"),
+      visibility: data.get("visibility"),
+    }),
+  });
+  const index = state.dashboard.datasets.findIndex((item) => item.id === datasetId);
+  if (index >= 0) state.dashboard.datasets[index] = { ...state.dashboard.datasets[index], ...updated };
+  delete state.details[detailKey("dataset", datasetId)];
+  state.selected.dataset = datasetId;
+  render();
+  await loadResourceDetail("dataset", datasetId);
+}
+
 function upsertJob(job) {
   const jobs = state.dashboard?.jobs || [];
   const index = jobs.findIndex((item) => item.id === job.id);
@@ -1389,6 +1567,86 @@ async function loadResourceDetail(type, id) {
     state.details[key] = { error: error.message };
   }
   renderAllDetails();
+}
+
+async function previewDatasetVersion(version) {
+  const dataset = findResource("dataset", state.selected.dataset);
+  if (!dataset || !version) return;
+  const key = detailKey("dataset", dataset.id);
+  if (!state.details[key]) await loadResourceDetail("dataset", dataset.id);
+  try {
+    const preview = await api(`/api/v1/datasets/${encodeURIComponent(dataset.id)}/versions/${encodeURIComponent(version)}/preview?limit=50`);
+    state.details[key] = {
+      ...(state.details[key] || {}),
+      preview: {
+        ...(state.details[key]?.preview || {}),
+        [version]: preview,
+      },
+      selectedPreview: version,
+    };
+  } catch (error) {
+    state.details[key] = {
+      ...(state.details[key] || {}),
+      preview: {
+        ...(state.details[key]?.preview || {}),
+        [version]: { version, rows: [], schema: { columns: [] }, profile: {}, storageUri: error.message },
+      },
+      selectedPreview: version,
+    };
+  }
+  renderCatalogDatasetDetail();
+  renderDatasetDetail();
+}
+
+async function useDatasetVersionForTraining(datasetRef) {
+  if (!datasetRef) return;
+  const datasetId = datasetRef.split("@")[0];
+  const dataset = findResource("dataset", datasetId);
+  const compatibleTemplate = executableTemplates().find((template) => {
+    const types = template.datasetTypes || [];
+    return dataset && (!types.length || types.includes(dataset.type));
+  });
+  state.trainingForm.open = true;
+  state.trainingForm.error = "";
+  state.trainingForm.defaults = { datasetRef, templateId: compatibleTemplate?.id || "" };
+  applyView("training");
+  renderTrainingForm();
+  await loadTrainingVersions();
+  state.trainingForm.defaults = { datasetRef, templateId: compatibleTemplate?.id || "" };
+  renderTrainingForm();
+}
+
+async function archiveDataset(datasetId) {
+  if (!datasetId) return;
+  const archived = await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`, { method: "DELETE" });
+  const index = state.dashboard.datasets.findIndex((item) => item.id === datasetId);
+  if (index >= 0) state.dashboard.datasets[index] = { ...state.dashboard.datasets[index], ...archived };
+  state.trainingForm.versions = [];
+  delete state.details[detailKey("dataset", datasetId)];
+  render();
+  await loadResourceDetail("dataset", datasetId);
+}
+
+async function restoreDataset(datasetId) {
+  if (!datasetId) return;
+  const restored = await api(`/api/v1/datasets/${encodeURIComponent(`${datasetId}:restore`)}`, { method: "POST", body: JSON.stringify({}) });
+  const index = state.dashboard.datasets.findIndex((item) => item.id === datasetId);
+  if (index >= 0) state.dashboard.datasets[index] = { ...state.dashboard.datasets[index], ...restored };
+  state.trainingForm.versions = [];
+  delete state.details[detailKey("dataset", datasetId)];
+  render();
+  await loadResourceDetail("dataset", datasetId);
+}
+
+async function unlinkProjectDataset(datasetId) {
+  if (!state.currentProjectId || !datasetId) return;
+  await api(`/api/v1/projects/${encodeURIComponent(state.currentProjectId)}/datasets/${encodeURIComponent(datasetId)}`, { method: "DELETE" });
+  state.dashboard.datasets = state.dashboard.datasets.filter((item) => item.id !== datasetId);
+  if (state.dashboard.summary) state.dashboard.summary.datasets = state.dashboard.datasets.length;
+  delete state.details[detailKey("dataset", datasetId)];
+  state.selected.dataset = state.dashboard.datasets[0]?.id || null;
+  state.trainingForm.versions = [];
+  render();
 }
 
 async function runFullTest() {
@@ -1502,6 +1760,36 @@ document.addEventListener("click", (event) => {
     jumpToDatasetVersion(datasetVersionButton.dataset.jumpDatasetVersion);
     return;
   }
+  const previewButton = event.target.closest("[data-preview-dataset-version]");
+  if (previewButton) {
+    event.preventDefault();
+    previewDatasetVersion(previewButton.dataset.previewDatasetVersion);
+    return;
+  }
+  const useVersionButton = event.target.closest("[data-use-dataset-version]");
+  if (useVersionButton) {
+    event.preventDefault();
+    useDatasetVersionForTraining(useVersionButton.dataset.useDatasetVersion);
+    return;
+  }
+  const archiveButton = event.target.closest("[data-archive-dataset]");
+  if (archiveButton) {
+    event.preventDefault();
+    archiveDataset(archiveButton.dataset.archiveDataset);
+    return;
+  }
+  const restoreButton = event.target.closest("[data-restore-dataset]");
+  if (restoreButton) {
+    event.preventDefault();
+    restoreDataset(restoreButton.dataset.restoreDataset);
+    return;
+  }
+  const unlinkButton = event.target.closest("[data-unlink-project-dataset]");
+  if (unlinkButton) {
+    event.preventDefault();
+    unlinkProjectDataset(unlinkButton.dataset.unlinkProjectDataset);
+    return;
+  }
   const row = event.target.closest("tr[data-resource-type]");
   if (!row || !state.dashboard) return;
   selectResource(row.dataset.resourceType, row.dataset.resourceId);
@@ -1546,6 +1834,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("submit", submitModelRegistration);
+document.addEventListener("submit", submitDatasetMetadata);
 
 $("#refreshButton").addEventListener("click", refresh);
 $("#projectBackButton").addEventListener("click", showProjects);

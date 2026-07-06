@@ -188,6 +188,82 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertIn("event_time", profile["datetimeLike"])
         self.assertTrue(self.app.storage.exists(version["storageUri"]))
 
+    def test_dataset_management_updates_previews_archives_restores_and_unlinks(self):
+        project = self.app.create_project("dataset-ops", "alice", "ml")
+        dataset = self.app.create_dataset(
+            "ops-source",
+            "tabular",
+            "alice",
+            "ml",
+            description="Initial description",
+            tags=["old"],
+            project_id=project["id"],
+            domain="ops",
+            source_system="manual",
+        )
+        version = self.app.add_dataset_version(dataset["id"], "v1", "s3://datasets/iris/v1/iris.csv", "csv", created_by="alice")
+
+        updated = self.app.update_dataset(
+            dataset["id"],
+            {
+                "name": "ops-source-renamed",
+                "description": "Renamed without changing lineage identity",
+                "tags": ["ops", "golden"],
+                "domain": "crm",
+                "sourceSystem": "warehouse",
+                "visibility": "public",
+            },
+            actor="alice",
+        )
+        preview = self.app.preview_dataset_version(dataset["id"], "v1", limit=2)
+        archived = self.app.archive_dataset(dataset["id"], actor="alice")
+
+        self.assertEqual(updated["id"], dataset["id"])
+        self.assertEqual(updated["name"], "ops-source-renamed")
+        self.assertEqual(updated["tags"], ["ops", "golden"])
+        self.assertEqual(updated["domain"], "crm")
+        self.assertEqual(updated["sourceSystem"], "warehouse")
+        self.assertEqual(preview["datasetId"], dataset["id"])
+        self.assertEqual(preview["version"], "v1")
+        self.assertEqual(preview["format"], "csv")
+        self.assertEqual(preview["limit"], 2)
+        self.assertTrue(preview["truncated"])
+        self.assertEqual([row["label"] for row in preview["rows"]], ["setosa", "setosa"])
+        self.assertEqual(preview["schema"], version["schema"])
+        self.assertEqual(archived["status"], "archived")
+        self.assertFalse(any(item["id"] == dataset["id"] for item in self.app.list_datasets()))
+        self.assertEqual(self.app.get_dataset(dataset["id"])["status"], "archived")
+
+        with self.assertRaisesRegex(ValueError, "DATASET_ARCHIVED"):
+            self.app.submit_training_job(
+                "sklearn-kmeans",
+                f"{dataset['id']}@v1",
+                "ops/archived",
+                {"n_clusters": 2},
+                "alice",
+                "ml",
+                project_id=project["id"],
+            )
+
+        restored = self.app.restore_dataset(dataset["id"], actor="alice")
+        unlinked = self.app.unlink_project_dataset(project["id"], dataset["id"], actor="alice")
+
+        self.assertEqual(restored["status"], "active")
+        self.assertEqual(unlinked["projectId"], project["id"])
+        self.assertEqual(unlinked["datasetId"], dataset["id"])
+        self.assertEqual(self.app.get_dataset(dataset["id"])["id"], dataset["id"])
+        self.assertEqual(self.app.list_project_datasets(project["id"]), [])
+        with self.assertRaisesRegex(ValueError, "DATASET_NOT_LINKED_TO_PROJECT"):
+            self.app.submit_training_job(
+                "sklearn-kmeans",
+                f"{dataset['id']}@v1",
+                "ops/unlinked",
+                {"n_clusters": 2},
+                "alice",
+                "ml",
+                project_id=project["id"],
+            )
+
     def test_import_local_csv_rejects_missing_source(self):
         dataset = self.app.create_dataset("generic-missing", "tabular", "alice", "ml")
 
@@ -1115,6 +1191,51 @@ class Phase1StoriesTest(unittest.TestCase):
             server.send_signal(signal.SIGINT)
             server.wait(timeout=5)
 
+    def test_dataset_management_api_contracts(self):
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8772"
+        env["PYTHONPATH"] = str(ROOT)
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8772/healthz")
+            project = self._api_post("http://127.0.0.1:8772/api/v1/projects", {"name": "dataset-api", "owner": "alice", "team": "ml"})
+            dataset = self._api_post(
+                "http://127.0.0.1:8772/api/v1/datasets",
+                {"name": "api-managed", "type": "tabular", "owner": "alice", "team": "ml", "projectId": project["id"]},
+            )
+            self._api_post(
+                f"http://127.0.0.1:8772/api/v1/datasets/{dataset['id']}/versions",
+                {"version": "v1", "storageUri": "s3://datasets/iris/v1/iris.csv", "format": "csv", "createdBy": "alice"},
+            )
+
+            updated = self._api_patch(
+                f"http://127.0.0.1:8772/api/v1/datasets/{dataset['id']}",
+                {"name": "api-managed-renamed", "description": "metadata update", "tags": ["api"], "visibility": "public"},
+            )
+            preview = self._api_get(f"http://127.0.0.1:8772/api/v1/datasets/{dataset['id']}/versions/v1/preview?limit=1")
+            archived = self._api_delete(f"http://127.0.0.1:8772/api/v1/datasets/{dataset['id']}")
+            restored = self._api_post(f"http://127.0.0.1:8772/api/v1/datasets/{dataset['id']}:restore", {})
+            unlinked = self._api_delete(f"http://127.0.0.1:8772/api/v1/projects/{project['id']}/datasets/{dataset['id']}")
+
+            self.assertEqual(updated["id"], dataset["id"])
+            self.assertEqual(updated["name"], "api-managed-renamed")
+            self.assertEqual(preview["rows"][0]["label"], "setosa")
+            self.assertEqual(archived["status"], "archived")
+            self.assertEqual(restored["status"], "active")
+            self.assertEqual(unlinked["datasetId"], dataset["id"])
+            self.assertEqual(self._api_get(f"http://127.0.0.1:8772/api/v1/projects/{project['id']}/datasets"), [])
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
     def test_training_retry_cancel_and_alias_delete_contracts(self):
         dataset = self.app.create_dataset("demo-iris", "tabular", "alice", "ml")
         self.app.add_dataset_version(dataset["id"], "v1", "s3://datasets/iris/v1/iris.csv", "csv", created_by="alice")
@@ -1282,6 +1403,25 @@ class Phase1StoriesTest(unittest.TestCase):
     def _api_post(self, url: str, payload: dict):
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=8) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            self.fail(exc.read().decode("utf-8"))
+
+    def _api_patch(self, url: str, payload: dict):
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="PATCH")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=8) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            self.fail(exc.read().decode("utf-8"))
+
+    def _api_delete(self, url: str):
+        request = urllib.request.Request(url, method="DELETE")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(request, timeout=8) as response:

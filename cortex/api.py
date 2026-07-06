@@ -4,7 +4,7 @@ import json
 import mimetypes
 import os
 import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -120,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.list_run_artifacts(parts[3]))
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 7 and parts[4] == "versions" and parts[6] == "runs":
                 self._json(200, self.app.dataset_lineage(f"{parts[3]}@{parts[5]}"))
+            elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 7 and parts[4] == "versions" and parts[6] == "preview":
+                self._json(200, self.app.preview_dataset_version(parts[3], parts[5], int(query.get("limit", ["50"])[0])))
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 5 and parts[4] == "versions":
                 self._json(200, self.app.list_dataset_versions(parts[3]))
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 6 and parts[4] == "versions":
@@ -163,6 +165,8 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("notes", ""),
                     ),
                 )
+            elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 4 and parts[3].endswith(":restore"):
+                self._json(200, self.app.restore_dataset(parts[3].removesuffix(":restore"), self.headers.get("X-Cortex-User", body.get("actor", "unknown"))))
             elif parts == ["api", "v1", "datasets"]:
                 self._json(
                     201,
@@ -264,12 +268,31 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._json(500, {"error": str(exc) or exc.__class__.__name__})
 
+    def do_PATCH(self) -> None:
+        try:
+            path = unquote(urlparse(self.path).path)
+            parts = [p for p in path.split("/") if p]
+            body = self._body()
+            if parts[:3] == ["api", "v1", "datasets"] and len(parts) == 4:
+                self._json(200, self.app.update_dataset(parts[3], body, self.headers.get("X-Cortex-User", body.get("actor", "unknown"))))
+            else:
+                self._json(404, {"error": "NOT_FOUND"})
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception as exc:
+            traceback.print_exc()
+            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+
     def do_DELETE(self) -> None:
         try:
             path = unquote(urlparse(self.path).path)
             parts = [p for p in path.split("/") if p]
             if parts[:3] == ["api", "v1", "models"] and len(parts) == 6 and parts[4] == "aliases":
                 self._json(200, self.app.delete_model_alias(parts[3], parts[5], self.headers.get("X-Cortex-User", "unknown"), "api delete"))
+            elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 4:
+                self._json(200, self.app.archive_dataset(parts[3], self.headers.get("X-Cortex-User", "unknown")))
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 6 and parts[4] == "datasets":
+                self._json(200, self.app.unlink_project_dataset(parts[3], parts[5], self.headers.get("X-Cortex-User", "unknown")))
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
@@ -286,7 +309,7 @@ def main() -> None:
     host = os.environ.get("CORTEX_HOST", "0.0.0.0")
     port = int(os.environ.get("CORTEX_PORT", "8000"))
     Handler.app = CortexApp.open()
-    server = HTTPServer((host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     print(f"cortex api listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 
