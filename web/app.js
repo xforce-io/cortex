@@ -633,10 +633,11 @@ function renderProjectCards() {
       datasets,
       6,
       (dataset) =>
-        `<tr><td>${escapeHtml(dataset.name)}</td><td>${escapeHtml(dataset.type)}</td><td>${dataset.versionCount || 0}</td><td>${escapeHtml(dataset.latestVersion || "")}</td><td>${escapeHtml(dataset.owner)}</td><td>${pill(dataset.status)}</td></tr>`,
+        `<tr ${clickableRow("dataset", dataset.id)}><td>${escapeHtml(dataset.name)}</td><td>${escapeHtml(dataset.type)}</td><td>${dataset.versionCount || 0}</td><td>${escapeHtml(dataset.latestVersion || "")}</td><td>${escapeHtml(dataset.owner)}</td><td>${pill(dataset.status)}</td></tr>`,
       t("table.noDatasets"),
     );
   }
+  renderCatalogDatasetDetail();
 }
 
 function ensureSelections() {
@@ -1003,6 +1004,7 @@ function setDetail(containerId, title, subtitle, body) {
 }
 
 function renderAllDetails() {
+  renderCatalogDatasetDetail();
   renderDatasetDetail();
   renderJobDetail();
   renderRunDetail();
@@ -1011,12 +1013,7 @@ function renderAllDetails() {
   renderEvaluationDetail();
 }
 
-function renderDatasetDetail() {
-  const dataset = findResource("dataset", state.selected.dataset);
-  if (!dataset) {
-    setDetail("#datasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
-    return;
-  }
+function datasetDetailBody(dataset) {
   const extra = state.details[detailKey("dataset", dataset.id)];
   const versions = extra?.versions || [];
   const lineage = extra?.lineage || [];
@@ -1089,11 +1086,7 @@ function renderDatasetDetail() {
         ["Pinned version", escapeHtml(dataset.projectLink.pinnedVersion || t("common.empty"))],
       ])
     : `<p class="muted">${state.currentProjectId ? t("common.empty") : "Workspace catalog"}</p>`;
-  setDetail(
-    "#datasetDetail",
-    dataset.name,
-    dataset.description || dataset.id,
-    `<div class="detail-actions">${archiveAction}${unlinkAction}</div>` +
+  return `<div class="detail-actions">${archiveAction}${unlinkAction}</div>` +
       `<h4>${t("section.metadata")}</h4>` +
       metadataForm +
       detailList([
@@ -1108,8 +1101,27 @@ function renderDatasetDetail() {
       `<h4>${t("section.versions")}</h4>${versionTable}` +
       renderPreviewTable(preview) +
       `<h4>${t("section.projectLink")}</h4>${projectLink}` +
-      `<h4>${t("section.lineage")}</h4>${lineage.length ? detailList(lineage.map((item) => [shortId(item.mlflowRunId), `${escapeHtml(item.jobStatus)} · ${escapeHtml(item.registeredModelName || t("common.noModel"))}${item.modelVersion ? `:${escapeHtml(item.modelVersion)}` : ""}`])) : `<p class="muted">${extra ? t("common.noDownstreamRuns") : t("common.loadingLineage")}</p>`}`,
-  );
+      `<h4>${t("section.lineage")}</h4>${lineage.length ? detailList(lineage.map((item) => [shortId(item.mlflowRunId), `${escapeHtml(item.jobStatus)} · ${escapeHtml(item.registeredModelName || t("common.noModel"))}${item.modelVersion ? `:${escapeHtml(item.modelVersion)}` : ""}`])) : `<p class="muted">${extra ? t("common.noDownstreamRuns") : t("common.loadingLineage")}</p>`}`;
+}
+
+function renderCatalogDatasetDetail() {
+  const container = $("#catalogDatasetDetail");
+  if (!container) return;
+  const dataset = findResource("dataset", state.selected.dataset);
+  if (!dataset) {
+    setDetail("#catalogDatasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
+    return;
+  }
+  setDetail("#catalogDatasetDetail", dataset.name, dataset.description || dataset.id, datasetDetailBody(dataset));
+}
+
+function renderDatasetDetail() {
+  const dataset = findResource("dataset", state.selected.dataset);
+  if (!dataset) {
+    setDetail("#datasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
+    return;
+  }
+  setDetail("#datasetDetail", dataset.name, dataset.description || dataset.id, datasetDetailBody(dataset));
 }
 
 function renderJobDetail() {
@@ -1575,6 +1587,7 @@ async function previewDatasetVersion(version) {
       selectedPreview: version,
     };
   }
+  renderCatalogDatasetDetail();
   renderDatasetDetail();
 }
 

@@ -253,6 +253,56 @@ assert.match(html, /c_001/);
 """
         )
 
+    def test_workspace_catalog_rows_open_dataset_metadata(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = null;
+state.dashboard = {
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  projects: [],
+  datasets: [
+    {
+      id: "ds_catalog_features",
+      name: "catalog-features",
+      description: "Global catalog dataset",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      domain: "crm",
+      sourceSystem: "warehouse",
+      visibility: "team",
+      tags: ["golden"],
+      status: "active",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+    },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.selected.dataset = "ds_catalog_features";
+state.details["dataset:ds_catalog_features"] = {
+  versions: [{ id: "dv_catalog_v1", datasetId: "ds_catalog_features", version: "v1", format: "csv", storageUri: "s3://datasets/catalog/v1/data.csv", rowCount: 2, checksumStatus: "verified", trainable: true, approvalStatus: "approved" }],
+  lineage: [],
+};
+
+renderProjectCards();
+
+assert.match(elementFor("#catalogDatasetsBody").innerHTML, /data-resource-type="dataset" data-resource-id="ds_catalog_features"/);
+const detailHtml = elementFor("#catalogDatasetDetail").innerHTML;
+assert.match(detailHtml, /catalog-features/);
+assert.match(detailHtml, /Global catalog dataset/);
+assert.match(detailHtml, /DatasetVersion v1/);
+assert.match(detailHtml, /data-preview-dataset-version="v1"/);
+assert.doesNotMatch(detailHtml, /data-unlink-project-dataset/);
+"""
+        )
+
     def test_use_dataset_version_selects_compatible_training_template(self):
         self.run_app_script(
             r"""
