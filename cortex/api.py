@@ -102,8 +102,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.list_models())
             elif parts == ["api", "v1", "evaluations"]:
                 self._json(200, self.app.list_evaluations())
+            elif parts == ["api", "v1", "experiment-results"]:
+                self._json(200, self.app.list_experiment_results())
             elif parts[:3] == ["api", "v1", "evaluations"] and len(parts) == 4:
                 self._json(200, self.app.get_evaluation(parts[3]))
+            elif parts[:3] == ["api", "v1", "experiment-results"] and len(parts) == 4:
+                self._json(200, self.app.get_experiment_result(parts[3]))
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 4:
                 self._json(200, self.app.get_dataset(parts[3]))
             elif parts[:3] == ["api", "v1", "training"] and len(parts) == 5 and parts[3] == "jobs":
@@ -201,6 +205,18 @@ class Handler(BaseHTTPRequestHandler):
                         body["source"],
                         body.get("format", "csv"),
                         body.get("createdBy", body.get("owner", "unknown")),
+                    ),
+                )
+            elif parts == ["api", "v1", "experiment-results:import-predictions"]:
+                self._json(
+                    201,
+                    self.app.import_prediction_result(
+                        body["experimentName"],
+                        body["methodId"],
+                        body.get("methodKind", ""),
+                        body["source"],
+                        body.get("createdBy", body.get("owner", "unknown")),
+                        body.get("datasetRef", ""),
                     ),
                 )
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 5 and parts[4] == "versions":

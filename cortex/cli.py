@@ -105,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_sub.add_parser("show").add_argument("run_id")
     run_sub.add_parser("artifacts").add_argument("run_id")
 
+    experiment_result = sub.add_parser("experiment-result")
+    experiment_result_sub = experiment_result.add_subparsers(dest="command", required=True)
+    experiment_result_sub.add_parser("list")
+    result_import = experiment_result_sub.add_parser("import-predictions")
+    result_import.add_argument("--experiment", required=True)
+    result_import.add_argument("--method-id", required=True)
+    result_import.add_argument("--method-kind", default="")
+    result_import.add_argument("--source", required=True)
+    result_import.add_argument("--dataset-ref", default="")
+    result_import.add_argument("--created-by", default="unknown")
+
     model = sub.add_parser("model")
     model_sub = model.add_subparsers(dest="command", required=True)
     register = model_sub.add_parser("register")
@@ -180,6 +191,10 @@ def main(argv: list[str] | None = None) -> int:
             print_json(app.get_run(args.run_id))
         elif args.group == "run" and args.command == "artifacts":
             print_json(app.list_run_artifacts(args.run_id))
+        elif args.group == "experiment-result" and args.command == "list":
+            print_json(app.list_experiment_results())
+        elif args.group == "experiment-result" and args.command == "import-predictions":
+            print_json(app.import_prediction_result(args.experiment, args.method_id, args.method_kind, args.source, created_by=args.created_by, dataset_ref=args.dataset_ref))
         elif args.group == "model" and args.command == "register":
             print_json(app.register_model_version(args.name, args.run_id, args.artifact_path, args.description))
         elif args.group == "model" and args.command == "alias" and args.alias_command == "set":
