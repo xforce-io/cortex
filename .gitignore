@@ -12,6 +12,7 @@ venv/
 .DS_Store
 .cortex/
 .cortex-project-ui/
+exps/
 
 dist/
 build/
