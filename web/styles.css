@@ -177,6 +177,20 @@ h2 {
   gap: 8px;
 }
 
+.locale-control {
+  display: inline-flex;
+  align-items: center;
+  grid-auto-flow: column;
+  gap: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.locale-select {
+  width: auto;
+  min-width: 104px;
+}
+
 .section-actions {
   gap: 10px;
 }
