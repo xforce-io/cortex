@@ -798,27 +798,32 @@ class CortexApp:
             if value_column == "":
                 value_column = None
             time_column = str(job["params"].get("time_column", "")).strip() or None
-            series = self._prepare_mstl_series(rows, value_column=value_column, time_column=time_column)
+            group_column = str(job["params"].get("group_column", "")).strip() or None
             periods = self._parse_mstl_periods(job["params"].get("periods"))
-            periods = self._validate_mstl_periods(periods, len(series))
-            decomposition = self._run_mstl(series, periods, trend=trend, max_iter=max_iter)
-            fitted = self._mstl_fitted(decomposition, len(series))
-            metrics = self._regression_metrics(series.tolist(), fitted)
-            metrics["rows"] = len(series)
+            targets, predictions, series_info = self._mstl_targets_predictions(
+                rows,
+                value_column=value_column,
+                time_column=time_column,
+                group_column=group_column,
+                periods=periods,
+                trend=trend,
+                max_iter=max_iter,
+            )
+            metrics = self._regression_metrics(targets, predictions)
+            metrics["rows"] = len(targets)
             metrics["periods_count"] = len(periods)
+            if group_column:
+                metrics["groups"] = len(series_info["groups"])
             model_payload.update(
                 {
                     "modelKind": "mstl",
-                    "valueColumn": series.name or "",
+                    "valueColumn": value_column or series_info["valueColumn"],
                     "timeColumn": time_column or "",
+                    "groupColumn": group_column or "",
                     "periods": periods,
                     "trend": trend,
                     "maxIter": max_iter,
-                    "seriesInfo": {
-                        "rows": len(series),
-                        "firstIndex": str(series.index[0]) if len(series) else "",
-                        "lastIndex": str(series.index[-1]) if len(series) else "",
-                    },
+                    "seriesInfo": series_info,
                 }
             )
             progress(95, "Computed MSTL metrics")
@@ -904,6 +909,8 @@ class CortexApp:
         import pandas as pd
         values = []
         index = []
+        if time_column:
+            rows = sorted(rows, key=lambda row: row[time_column])
         for i, row in enumerate(rows):
             raw = row[value_column]
             if not isinstance(raw, (int, float)):
@@ -919,6 +926,59 @@ class CortexApp:
                 raise ValueError("MSTL_TIME_COLUMN_INVALID")
             return pd.Series(values, index=index_series, name=value_column)
         return pd.Series(values, index=pd.Index(index), name=value_column)
+
+    def _mstl_targets_predictions(
+        self,
+        rows: list[dict],
+        value_column: str | None,
+        time_column: str | None,
+        group_column: str | None,
+        periods: list[int],
+        trend: str,
+        max_iter: int,
+    ) -> tuple[list[float], list[float], dict]:
+        if group_column:
+            if group_column not in rows[0]:
+                raise ValueError("MSTL_GROUP_COLUMN_NOT_FOUND")
+            grouped: dict[str, list[dict]] = {}
+            for row in rows:
+                grouped.setdefault(str(row[group_column]), []).append(row)
+            targets: list[float] = []
+            predictions: list[float] = []
+            groups = []
+            resolved_value_column = value_column or ""
+            for group_key in sorted(grouped):
+                series = self._prepare_mstl_series(grouped[group_key], value_column=value_column, time_column=time_column)
+                resolved_value_column = series.name or resolved_value_column
+                validated_periods = self._validate_mstl_periods(periods, len(series))
+                decomposition = self._run_mstl(series, validated_periods, trend=trend, max_iter=max_iter)
+                fitted = self._mstl_fitted(decomposition, len(series))
+                targets.extend(float(item) for item in series.tolist())
+                predictions.extend(fitted)
+                groups.append(
+                    {
+                        "key": group_key,
+                        "rows": len(series),
+                        "firstIndex": str(series.index[0]) if len(series) else "",
+                        "lastIndex": str(series.index[-1]) if len(series) else "",
+                    }
+                )
+            return targets, predictions, {"rows": len(targets), "groups": groups, "valueColumn": resolved_value_column}
+
+        series = self._prepare_mstl_series(rows, value_column=value_column, time_column=time_column)
+        validated_periods = self._validate_mstl_periods(periods, len(series))
+        decomposition = self._run_mstl(series, validated_periods, trend=trend, max_iter=max_iter)
+        fitted = self._mstl_fitted(decomposition, len(series))
+        return (
+            [float(item) for item in series.tolist()],
+            fitted,
+            {
+                "rows": len(series),
+                "firstIndex": str(series.index[0]) if len(series) else "",
+                "lastIndex": str(series.index[-1]) if len(series) else "",
+                "valueColumn": series.name or "",
+            },
+        )
 
     def _run_mstl(self, series, periods: list[int], trend: str, max_iter: int):
         if not importlib.util.find_spec("statsmodels"):
@@ -1029,7 +1089,11 @@ class CortexApp:
         total = sum((target - mean_target) ** 2 for target in targets)
         residual = sum(error * error for error in errors)
         r2 = 1 - residual / total if total else 1.0
-        return {"mae": round(mae, 6), "rmse": round(mse**0.5, 6), "r2": round(r2, 6)}
+        rmse = mse**0.5
+        non_zero = [(target, prediction) for target, prediction in zip(targets, predictions) if target != 0]
+        mape = sum(abs((prediction - target) / target) for target, prediction in non_zero) / len(non_zero) * 100 if non_zero else 0.0
+        cv = rmse / abs(mean_target) * 100 if mean_target else 0.0
+        return {"mae": round(mae, 6), "rmse": round(rmse, 6), "r2": round(r2, 6), "mape": round(mape, 6), "cv": round(cv, 6)}
 
     def _task_type(self, template_id: str) -> str:
         if "kmeans" in template_id:
@@ -1245,21 +1309,30 @@ class CortexApp:
         elif payload.get("modelKind") == "mstl":
             value_column = payload.get("valueColumn", "")
             time_column = payload.get("timeColumn", "")
+            group_column = payload.get("groupColumn", "")
             periods = payload.get("periods", [])
             if not rows:
                 raise ValueError("DATASET_EMPTY")
             if not periods:
                 raise ValueError("MSTL_INVALID_PERIODS")
-            series = self._prepare_mstl_series(rows, value_column=value_column, time_column=time_column or None)
-            periods = self._validate_mstl_periods(self._parse_mstl_periods(",".join(str(period) for period in periods)), len(series))
+            parsed_periods = self._parse_mstl_periods(",".join(str(period) for period in periods))
             trend = payload.get("trend", "additive")
             max_iter = int(payload.get("maxIter", 100))
-            decomposition = self._run_mstl(series, periods, trend=trend, max_iter=max_iter)
-            predictions = self._mstl_fitted(decomposition, len(series))
+            targets, predictions, series_info = self._mstl_targets_predictions(
+                rows,
+                value_column=value_column,
+                time_column=time_column or None,
+                group_column=group_column or None,
+                periods=parsed_periods,
+                trend=trend,
+                max_iter=max_iter,
+            )
             if not predictions:
                 raise ValueError("MODEL_NOT_EVALUABLE")
-            metrics = {f"test_{key}": value for key, value in self._regression_metrics(list(series), predictions).items()}
-            metrics["test_rows"] = len(series)
+            metrics = {f"test_{key}": value for key, value in self._regression_metrics(targets, predictions).items()}
+            metrics["test_rows"] = len(targets)
+            if group_column:
+                metrics["test_groups"] = len(series_info["groups"])
         else:
             raise ValueError("MODEL_NOT_EVALUABLE")
         train_ref = self.get_run(model["run_id"])["tags"].get("dataset_version", "")
