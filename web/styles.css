@@ -536,7 +536,7 @@ label span {
   text-decoration: underline;
 }
 
-.link-button span:last-child {
+.link-button:not(.compact-link) span:last-child {
   font-size: 12px;
   font-weight: 650;
 }

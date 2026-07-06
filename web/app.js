@@ -13,6 +13,7 @@ const state = {
     evaluation: null,
   },
   details: {},
+  datasetVersionTargets: {},
   trainingForm: {
     open: false,
     versions: [],
@@ -361,6 +362,56 @@ function detailKey(type, id) {
   return `${type}:${id}`;
 }
 
+function rememberDatasetVersions(datasetId, versions) {
+  for (const version of versions || []) {
+    if (!version.id) continue;
+    state.datasetVersionTargets[version.id] = {
+      datasetId,
+      versionId: version.id,
+      version: version.version || "",
+    };
+  }
+}
+
+function findDatasetVersionTarget(versionId) {
+  if (!versionId) return null;
+  const cached = state.datasetVersionTargets[versionId];
+  if (cached) {
+    if (findResource("dataset", cached.datasetId)) return cached;
+    delete state.datasetVersionTargets[versionId];
+  }
+  for (const dataset of state.dashboard?.datasets || []) {
+    const versions = state.details[detailKey("dataset", dataset.id)]?.versions || [];
+    const version = versions.find((item) => item.id === versionId);
+    if (version) {
+      rememberDatasetVersions(dataset.id, versions);
+      return state.datasetVersionTargets[versionId];
+    }
+  }
+  return null;
+}
+
+async function loadDatasetVersionTarget(versionId) {
+  if (!versionId) return null;
+  const existing = findDatasetVersionTarget(versionId);
+  if (existing) return existing;
+  for (const dataset of state.dashboard?.datasets || []) {
+    const versions = await api(`/api/v1/datasets/${encodeURIComponent(dataset.id)}/versions`);
+    rememberDatasetVersions(dataset.id, versions);
+    const target = findDatasetVersionTarget(versionId);
+    if (target) return target;
+  }
+  return null;
+}
+
+function renderDatasetVersionLink(versionId) {
+  if (!versionId) return "empty";
+  const target = findDatasetVersionTarget(versionId);
+  const label = `<span class="mono">${escapeHtml(versionId)}</span>`;
+  if (!target) return label;
+  return `<button class="link-button compact-link" data-jump-dataset-version="${escapeHtml(versionId)}">${label}</button>`;
+}
+
 function detailList(items) {
   return `<dl class="detail-grid">${items.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${value || "empty"}</dd></div>`).join("")}</dl>`;
 }
@@ -621,7 +672,7 @@ function renderJobDetail() {
       ["Project", `<span class="mono">${escapeHtml(job.projectId || "empty")}</span>`],
       ["Status", pill(job.status)],
       ["Progress", progressBar(job.progressPercent, job.statusMessage)],
-      ["Dataset Version ID", `<span class="mono">${escapeHtml(job.datasetVersionId)}</span>`],
+      ["Dataset Version ID", renderDatasetVersionLink(job.datasetVersionId)],
       [
         "Run",
         job.mlflowRunId
@@ -988,12 +1039,15 @@ async function loadResourceDetail(type, id) {
     if (type === "dataset") {
       const dataset = findResource("dataset", id);
       const versions = await api(`/api/v1/datasets/${encodeURIComponent(id)}/versions`);
+      rememberDatasetVersions(id, versions);
       const latest = dataset?.latestVersion;
       const lineage = latest ? await api(`/api/v1/datasets/${encodeURIComponent(id)}/versions/${encodeURIComponent(latest)}/runs`) : [];
       state.details[key] = { versions, lineage };
     } else if (type === "job") {
       const logs = await api(`/api/v1/training/jobs/${encodeURIComponent(id)}/logs`);
       state.details[key] = logs;
+      const job = findResource("job", id);
+      await loadDatasetVersionTarget(job?.datasetVersionId);
     } else {
       state.details[key] = {};
     }
@@ -1048,6 +1102,15 @@ function applyView(view) {
   };
   const selection = selectedByView[view];
   if (selection) loadResourceDetail(selection[0], selection[1]);
+}
+
+async function jumpToDatasetVersion(versionId) {
+  const target = await loadDatasetVersionTarget(versionId);
+  if (!target) return;
+  state.selected.dataset = target.datasetId;
+  applyView("datasets");
+  render();
+  await loadResourceDetail("dataset", target.datasetId);
 }
 
 function bindNav() {
@@ -1108,6 +1171,12 @@ document.addEventListener("click", (event) => {
     jumpToRun(runButton.dataset.jumpRun);
     return;
   }
+  const datasetVersionButton = event.target.closest("[data-jump-dataset-version]");
+  if (datasetVersionButton) {
+    event.preventDefault();
+    jumpToDatasetVersion(datasetVersionButton.dataset.jumpDatasetVersion);
+    return;
+  }
   const row = event.target.closest("tr[data-resource-type]");
   if (!row || !state.dashboard) return;
   selectResource(row.dataset.resourceType, row.dataset.resourceId);
@@ -1117,6 +1186,7 @@ async function selectProject(projectId) {
   state.currentProjectId = projectId;
   state.activeView = "dashboard";
   state.details = {};
+  state.datasetVersionTargets = {};
   state.trainingForm.versions = [];
   await refresh();
 }
@@ -1125,6 +1195,7 @@ async function showProjects() {
   state.currentProjectId = null;
   state.activeView = "dashboard";
   state.details = {};
+  state.datasetVersionTargets = {};
   state.trainingForm.versions = [];
   await refresh();
 }
@@ -1135,6 +1206,12 @@ document.addEventListener("keydown", (event) => {
   if (runButton) {
     event.preventDefault();
     jumpToRun(runButton.dataset.jumpRun);
+    return;
+  }
+  const datasetVersionButton = event.target.closest("[data-jump-dataset-version]");
+  if (datasetVersionButton) {
+    event.preventDefault();
+    jumpToDatasetVersion(datasetVersionButton.dataset.jumpDatasetVersion);
     return;
   }
   const row = event.target.closest("tr[data-resource-type]");
