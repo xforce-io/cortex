@@ -166,6 +166,16 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(run["tags"]["platform.projectId"], default_project["id"])
         self.assertEqual(self.app.list_project_datasets(default_project["id"])[0]["id"], dataset["id"])
 
+    def test_default_project_backfills_legacy_dataset_links(self):
+        dataset = self.app.create_dataset("legacy-manual", "tabular", "alice", "ml")
+        self.app.conn.execute("DELETE FROM project_dataset_links WHERE dataset_id = ?", (dataset["id"],))
+        self.app.conn.commit()
+
+        reopened = CortexApp.open(self.home)
+        links = reopened.list_project_datasets("proj_default")
+
+        self.assertTrue(any(item["id"] == dataset["id"] for item in links))
+
     def test_unimplemented_training_template_does_not_fake_success(self):
         dataset = self.app.create_dataset("demo-iris", "tabular", "alice", "ml")
         self.app.add_dataset_version(dataset["id"], "v1", "s3://datasets/iris/v1/iris.csv", "csv", created_by="alice")

@@ -157,6 +157,7 @@ class CortexApp:
     def ensure_default_project(self) -> dict:
         row = decode_row(self.conn.execute("SELECT * FROM projects WHERE id = 'proj_default'").fetchone())
         if row:
+            self._backfill_default_project_dataset_links()
             return public_project(row)
         ts = now()
         self.conn.execute(
@@ -167,7 +168,31 @@ class CortexApp:
             (ts, ts),
         )
         self.conn.commit()
+        self._backfill_default_project_dataset_links()
         return self.get_project("proj_default")
+
+    def _backfill_default_project_dataset_links(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT d.id, d.owner
+            FROM datasets d
+            LEFT JOIN project_dataset_links l
+              ON l.project_id = 'proj_default' AND l.dataset_id = d.id
+            WHERE l.id IS NULL
+            """
+        ).fetchall()
+        if not rows:
+            return
+        ts = now()
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO project_dataset_links(id, project_id, dataset_id, role, version_policy, added_by, added_at, notes)
+                VALUES (?, 'proj_default', ?, 'train', 'latest', ?, ?, 'legacy workspace backfill')
+                """,
+                (f"pdl_{uuid4().hex[:12]}", row["id"], row["owner"] or "system", ts),
+            )
+        self.conn.commit()
 
     def get_default_project(self) -> dict:
         return self.ensure_default_project()
