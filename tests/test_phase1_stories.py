@@ -720,6 +720,16 @@ class Phase1StoriesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PREDICTION_ARRAYS_REQUIRED"):
             self.app.import_prediction_result("generic-sequence", "method-a", "sequence", source, created_by="alice")
 
+    def test_prediction_result_mape_ignores_near_zero_targets(self):
+        import numpy as np
+
+        source = self.home / "near-zero-predictions.npz"
+        np.savez(source, y_true=np.array([0.0, 0.5, 2.0]), y_pred=np.array([100.0, 100.0, 1.0]))
+
+        result = self.app.import_prediction_result("generic-sequence", "method-a", "sequence", source, created_by="alice")
+
+        self.assertEqual(result["metrics"]["mape"], 50.0)
+
     def test_cli_imports_prediction_result(self):
         import numpy as np
 
