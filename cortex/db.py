@@ -203,14 +203,20 @@ def seed_templates(conn: sqlite3.Connection) -> None:
         ("sklearn-kmeans", "sklearn KMeans", "sklearn", ["tabular"], {"n_clusters": "int", "random_state": "int"}),
         ("sklearn-classifier", "sklearn classifier", "sklearn", ["tabular"], {"target": "str"}),
         ("sklearn-regressor", "sklearn regressor", "sklearn", ["tabular"], {"target": "str"}),
-        ("statsmodels-mstl", "MSTL", "statsmodels", ["time_series"], {"value_column": "str", "time_column": "str", "periods": "str", "trend": "str", "max_iter": "int"}),
+        ("statsmodels-mstl", "MSTL", "statsmodels", ["time_series"], {"value_column": "str", "time_column": "str", "group_column": "str", "periods": "str", "trend": "str", "max_iter": "int"}),
         ("pytorch-basic", "PyTorch basic", "pytorch", ["tabular", "time_series"], {"epochs": "int"}),
     ]
     for row in templates:
         conn.execute(
             """
-            INSERT OR IGNORE INTO training_templates(id, name, model_type, dataset_types, param_schema, enabled)
+            INSERT INTO training_templates(id, name, model_type, dataset_types, param_schema, enabled)
             VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              model_type = excluded.model_type,
+              dataset_types = excluded.dataset_types,
+              param_schema = excluded.param_schema,
+              enabled = excluded.enabled
             """,
             (row[0], row[1], row[2], json.dumps(row[3]), json.dumps(row[4])),
         )

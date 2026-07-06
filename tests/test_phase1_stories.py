@@ -391,6 +391,91 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertIn("test_mae", evaluation["metrics"])
         self.assertIn("test_rmse", evaluation["metrics"])
 
+    def test_mstl_grouped_training_and_evaluate(self):
+        self._skip_if_no_mstl()
+        dataset = self.app.create_dataset("grouped-baseline", "time_series", "alice", "ml")
+        train_source = self.home / "grouped-train.csv"
+        train_rows = ["series_key,ts,value"]
+        for key in ("a", "b"):
+            offset = 0 if key == "a" else 5
+            for i in range(60):
+                train_rows.append(f"{key},2020-01-{(i // 24) + 1:02d} {i % 24:02d}:00:00,{offset + 10 + (i % 12) * 1.5}")
+        train_source.write_text("\n".join(train_rows), encoding="utf-8")
+        train_uri = "s3://datasets/grouped-baseline/v1/train.csv"
+        self.app.storage.put_file(train_uri, train_source)
+        train_version = self.app.add_dataset_version(dataset["id"], "v1", train_uri, "csv", created_by="alice")
+
+        job = self.app.submit_training_job(
+            "statsmodels-mstl",
+            f"{dataset['id']}@{train_version['version']}",
+            "demo/grouped-baseline",
+            {"periods": "12", "time_column": "ts", "value_column": "value", "group_column": "series_key", "trend": "additive", "max_iter": 20},
+            "alice",
+            "ml",
+            wait=True,
+        )
+        run = self.app.get_run(job["mlflowRunId"])
+        model_payload = json.loads((self.app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(run["metrics"]["groups"], 2)
+        self.assertEqual(run["metrics"]["rows"], 120)
+        self.assertIn("mape", run["metrics"])
+        self.assertIn("cv", run["metrics"])
+        self.assertEqual(model_payload["groupColumn"], "series_key")
+
+        model_version = self.app.register_model_version("grouped-baseline-model", run["id"], "model", "grouped baseline")
+        test_source = self.home / "grouped-test.csv"
+        test_rows = ["series_key,ts,value"]
+        for key in ("a", "b"):
+            offset = 0 if key == "a" else 5
+            for i in range(30):
+                test_rows.append(f"{key},2020-02-{(i // 24) + 1:02d} {i % 24:02d}:00:00,{offset + 10 + ((i + 60) % 12) * 1.5}")
+        test_source.write_text("\n".join(test_rows), encoding="utf-8")
+        test_uri = "s3://datasets/grouped-baseline-test/v1/test.csv"
+        self.app.storage.put_file(test_uri, test_source)
+        test_dataset = self.app.create_dataset("grouped-baseline-test", "eval_set", "alice", "ml")
+        test_version = self.app.add_dataset_version(test_dataset["id"], "v1", test_uri, "csv", created_by="alice")
+
+        evaluation = self.app.evaluate_model_version(
+            "grouped-baseline-model",
+            model_version["version"],
+            f"{test_dataset['id']}@{test_version['version']}",
+            "alice",
+            "ml",
+        )
+
+        self.assertEqual(evaluation["status"], "succeeded")
+        self.assertEqual(evaluation["metrics"]["test_groups"], 2)
+        self.assertEqual(evaluation["metrics"]["test_rows"], 60)
+        self.assertIn("test_rmse", evaluation["metrics"])
+        self.assertIn("test_mape", evaluation["metrics"])
+        self.assertIn("test_cv", evaluation["metrics"])
+
+    def test_mstl_grouped_rejects_missing_group_column(self):
+        dataset = self.app.create_dataset("grouped-missing", "time_series", "alice", "ml")
+        source = self.home / "grouped-missing.csv"
+        rows = ["ts,value"]
+        for i in range(30):
+            rows.append(f"2020-01-01 {i % 24:02d}:00:00,{10 + (i % 12)}")
+        source.write_text("\n".join(rows), encoding="utf-8")
+        source_uri = "s3://datasets/grouped-missing/v1/train.csv"
+        self.app.storage.put_file(source_uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", source_uri, "csv", created_by="alice")
+
+        failed = self.app.submit_training_job(
+            "statsmodels-mstl",
+            f"{dataset['id']}@{version['version']}",
+            "demo/grouped-missing",
+            {"periods": "12", "time_column": "ts", "value_column": "value", "group_column": "series_key"},
+            "alice",
+            "ml",
+            wait=True,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("MSTL_GROUP_COLUMN_NOT_FOUND", failed["errorMessage"])
+
     def test_mstl_invalid_periods(self):
         self._skip_if_no_mstl()
         dataset = self.app.create_dataset("mstl-invalid", "time_series", "alice", "ml")
