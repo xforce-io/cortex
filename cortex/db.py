@@ -215,6 +215,7 @@ def seed_templates(conn: sqlite3.Connection) -> None:
         ("sklearn-classifier", "sklearn classifier", "sklearn", ["tabular"], {"target": "str"}),
         ("sklearn-regressor", "sklearn regressor", "sklearn", ["tabular"], {"target": "str"}),
         ("statsmodels-mstl", "MSTL", "statsmodels", ["time_series"], {"value_column": "str", "time_column": "str", "group_column": "str", "periods": "str", "trend": "str", "max_iter": "int"}),
+        ("pytorch-sequence-forecast", "PyTorch sequence forecast", "pytorch", ["time_series"], {"time_column": "str", "target_column": "str", "group_column": "str", "feature_columns": "str", "window": "int", "horizon": "int", "epochs": "int", "learning_rate": "float", "hidden_size": "int", "seed": "int", "warm_start_model": "str"}),
         ("pytorch-basic", "PyTorch basic", "pytorch", ["tabular", "time_series"], {"epochs": "int"}),
     ]
     for row in templates:

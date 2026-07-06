@@ -23,6 +23,11 @@ class Phase1StoriesTest(unittest.TestCase):
         if importlib.util.find_spec("statsmodels") is None:
             raise unittest.SkipTest("statsmodels not installed")
 
+    @staticmethod
+    def _skip_if_no_torch() -> None:
+        if importlib.util.find_spec("torch") is None:
+            raise unittest.SkipTest("torch not installed")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
@@ -236,6 +241,7 @@ class Phase1StoriesTest(unittest.TestCase):
         templates = {template["id"]: template for template in self.app.list_templates()}
         self.assertEqual(templates["sklearn-kmeans"]["executorStatus"], "available")
         self.assertEqual(templates["sklearn-regressor"]["executorStatus"], "available")
+        self.assertEqual(templates["pytorch-sequence-forecast"]["executorStatus"], "available")
         self.assertEqual(templates["sklearn-classifier"]["executorStatus"], "not_implemented")
 
         job = self.app.submit_training_job(
@@ -475,6 +481,137 @@ class Phase1StoriesTest(unittest.TestCase):
 
         self.assertEqual(failed["status"], "failed")
         self.assertIn("MSTL_GROUP_COLUMN_NOT_FOUND", failed["errorMessage"])
+
+    def test_sequence_forecast_template_trains_and_records_result(self):
+        self._skip_if_no_torch()
+        dataset = self.app.create_dataset("sequence-demo", "time_series", "alice", "ml")
+        source = self.home / "sequence-train.csv"
+        rows = ["step,target,feature"]
+        for i in range(80):
+            rows.append(f"{i},{10 + (i % 8) * 0.5},{(i % 5) * 0.25}")
+        source.write_text("\n".join(rows), encoding="utf-8")
+        uri = "s3://datasets/sequence-demo/v1/train.csv"
+        self.app.storage.put_file(uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", uri, "csv", created_by="alice")
+
+        job = self.app.submit_training_job(
+            "pytorch-sequence-forecast",
+            f"{dataset['id']}@{version['version']}",
+            "demo/sequence",
+            {
+                "time_column": "step",
+                "target_column": "target",
+                "feature_columns": "feature,target",
+                "window": 6,
+                "horizon": 1,
+                "epochs": 2,
+                "hidden_size": 4,
+                "learning_rate": 0.01,
+                "seed": 7,
+            },
+            "alice",
+            "ml",
+            wait=True,
+        )
+        run = self.app.get_run(job["mlflowRunId"])
+        model_payload = json.loads((self.app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+        results = self.app.list_experiment_results()
+
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(model_payload["modelKind"], "sequence_forecast")
+        self.assertEqual(model_payload["targetColumn"], "target")
+        self.assertIn("model/model.pt", run["artifacts"])
+        self.assertIn("rmse", run["metrics"])
+        self.assertEqual(results[0]["methodId"], "pytorch-sequence-forecast")
+        self.assertEqual(results[0]["datasetRef"], f"{dataset['id']}@v1")
+        self.assertIn("rmse", results[0]["metrics"])
+
+    def test_sequence_forecast_warm_start_trains_from_registered_model(self):
+        self._skip_if_no_torch()
+        dataset = self.app.create_dataset("sequence-warm-start", "time_series", "alice", "ml")
+        source = self.home / "sequence-warm.csv"
+        rows = ["step,target"]
+        for i in range(70):
+            rows.append(f"{i},{5 + (i % 10) * 0.4}")
+        source.write_text("\n".join(rows), encoding="utf-8")
+        uri = "s3://datasets/sequence-warm/v1/train.csv"
+        self.app.storage.put_file(uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", uri, "csv", created_by="alice")
+        params = {
+            "time_column": "step",
+            "target_column": "target",
+            "window": 5,
+            "horizon": 1,
+            "epochs": 1,
+            "hidden_size": 4,
+            "learning_rate": 0.01,
+            "seed": 11,
+        }
+        first = self.app.submit_training_job("pytorch-sequence-forecast", f"{dataset['id']}@{version['version']}", "demo/sequence-warm", params, "alice", "ml", wait=True)
+        registered = self.app.register_model_version("sequence-model", first["mlflowRunId"], "model", "sequence baseline")
+
+        second = self.app.submit_training_job(
+            "pytorch-sequence-forecast",
+            f"{dataset['id']}@{version['version']}",
+            "demo/sequence-warm",
+            params | {"warm_start_model": f"{registered['name']}:{registered['version']}"},
+            "alice",
+            "ml",
+            wait=True,
+        )
+        payload = json.loads((self.app.home / "mlruns" / second["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(second["status"], "succeeded")
+        self.assertEqual(payload["warmStartModel"], "sequence-model:1")
+
+    def test_sequence_forecast_rejects_invalid_mapping(self):
+        dataset = self.app.create_dataset("sequence-invalid", "time_series", "alice", "ml")
+        source = self.home / "sequence-invalid.csv"
+        source.write_text("step,target\n0,1\n1,2\n2,3\n3,4\n", encoding="utf-8")
+        uri = "s3://datasets/sequence-invalid/v1/train.csv"
+        self.app.storage.put_file(uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", uri, "csv", created_by="alice")
+
+        failed = self.app.submit_training_job(
+            "pytorch-sequence-forecast",
+            f"{dataset['id']}@{version['version']}",
+            "demo/sequence-invalid",
+            {"time_column": "step", "target_column": "missing", "window": 2, "horizon": 1},
+            "alice",
+            "ml",
+            wait=True,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("SEQUENCE_TARGET_COLUMN_NOT_FOUND", failed["errorMessage"])
+
+    def test_sequence_forecast_rejects_incompatible_warm_start(self):
+        self._skip_if_no_torch()
+        dataset = self.app.create_dataset("sequence-incompatible", "time_series", "alice", "ml")
+        source = self.home / "sequence-incompatible.csv"
+        rows = ["step,target"]
+        for i in range(60):
+            rows.append(f"{i},{3 + (i % 6)}")
+        source.write_text("\n".join(rows), encoding="utf-8")
+        uri = "s3://datasets/sequence-incompatible/v1/train.csv"
+        self.app.storage.put_file(uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", uri, "csv", created_by="alice")
+        params = {"time_column": "step", "target_column": "target", "window": 4, "horizon": 1, "epochs": 1, "hidden_size": 4}
+        first = self.app.submit_training_job("pytorch-sequence-forecast", f"{dataset['id']}@v1", "demo/sequence-incompatible", params, "alice", "ml", wait=True)
+        registered = self.app.register_model_version("sequence-incompatible-model", first["mlflowRunId"], "model", "sequence baseline")
+
+        failed = self.app.submit_training_job(
+            "pytorch-sequence-forecast",
+            f"{dataset['id']}@{version['version']}",
+            "demo/sequence-incompatible",
+            params | {"hidden_size": 8, "warm_start_model": f"{registered['name']}:{registered['version']}"},
+            "alice",
+            "ml",
+            wait=True,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("SEQUENCE_WARM_START_INCOMPATIBLE", failed["errorMessage"])
 
     def test_mstl_invalid_periods(self):
         self._skip_if_no_mstl()

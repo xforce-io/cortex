@@ -153,7 +153,7 @@ def public_experiment_result(row: dict) -> dict:
     }
 
 
-EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor", "statsmodels-mstl"}
+EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor", "statsmodels-mstl", "pytorch-sequence-forecast"}
 
 
 class CortexApp:
@@ -771,6 +771,7 @@ class CortexApp:
         progress(25, f"Prepared {len(rows)} rows")
         values = [[float(row[col]) for col in numeric_cols] for row in rows]
         model_payload = {"templateId": job["templateId"], "params": job["params"], "numericColumns": numeric_cols}
+        extra_artifacts = []
         if job["templateId"] == "sklearn-kmeans":
             k = int(job["params"].get("n_clusters", 2))
             min_duration = float(version.get("split", {}).get("minTrainingSeconds", job["params"].get("_min_duration_seconds", 0)) or 0)
@@ -804,6 +805,12 @@ class CortexApp:
                 }
             )
             progress(90, "Computed regression metrics")
+        elif job["templateId"] == "pytorch-sequence-forecast":
+            progress(30, "Preparing sequence windows")
+            metrics, sequence_payload, weights_file = self._train_sequence_forecast(job, version, rows, progress)
+            model_payload.update(sequence_payload)
+            extra_artifacts.append((weights_file, "model/model.pt"))
+            progress(95, "Computed sequence metrics")
         elif job["templateId"] == "statsmodels-mstl":
             progress(30, "Preparing MSTL series")
             trend = str(job["params"].get("trend", "additive"))
@@ -847,6 +854,8 @@ class CortexApp:
         model_payload["metrics"] = metrics
         model_file.write_text(json.dumps(model_payload), encoding="utf-8")
         self.mlflow.log_artifact(job["mlflowRunId"], model_file, "model/model.json")
+        for source, target in extra_artifacts:
+            self.mlflow.log_artifact(job["mlflowRunId"], source, target)
         log_path.write_text(f"job {job['id']} completed\nmetrics={json.dumps(metrics, sort_keys=True)}\n", encoding="utf-8")
         return metrics
 
@@ -870,6 +879,245 @@ class CortexApp:
                         parsed[key] = value
                 rows.append(parsed)
         return rows
+
+    def _train_sequence_forecast(self, job: dict, version: dict, rows: list[dict], progress) -> tuple[dict, dict, Path]:
+        if not importlib.util.find_spec("torch"):
+            raise ValueError("PYTORCH_NOT_AVAILABLE")
+        if not rows:
+            raise ValueError("DATASET_EMPTY")
+        import numpy as np
+        import torch
+        from torch import nn
+
+        params = job["params"]
+        time_column = str(params.get("time_column", "")).strip()
+        target_column = str(params.get("target_column", "")).strip()
+        group_column = str(params.get("group_column", "")).strip()
+        if not time_column:
+            raise ValueError("SEQUENCE_TIME_COLUMN_REQUIRED")
+        if not target_column:
+            raise ValueError("SEQUENCE_TARGET_COLUMN_REQUIRED")
+        if time_column not in rows[0]:
+            raise ValueError("SEQUENCE_TIME_COLUMN_NOT_FOUND")
+        if target_column not in rows[0]:
+            raise ValueError("SEQUENCE_TARGET_COLUMN_NOT_FOUND")
+        if group_column and group_column not in rows[0]:
+            raise ValueError("SEQUENCE_GROUP_COLUMN_NOT_FOUND")
+        if not isinstance(rows[0][target_column], (int, float)):
+            raise ValueError("SEQUENCE_TARGET_MUST_BE_NUMERIC")
+
+        feature_columns = self._parse_sequence_features(params.get("feature_columns"), target_column)
+        for column in feature_columns:
+            if column not in rows[0]:
+                raise ValueError("SEQUENCE_FEATURE_COLUMN_NOT_FOUND")
+            if not isinstance(rows[0][column], (int, float)):
+                raise ValueError("SEQUENCE_FEATURE_MUST_BE_NUMERIC")
+
+        window = self._positive_int(params.get("window", 8), "SEQUENCE_INVALID_WINDOW")
+        horizon = self._positive_int(params.get("horizon", 1), "SEQUENCE_INVALID_HORIZON")
+        epochs = max(1, min(200, self._positive_int(params.get("epochs", 10), "SEQUENCE_INVALID_EPOCHS")))
+        hidden_size = max(1, min(512, self._positive_int(params.get("hidden_size", 16), "SEQUENCE_INVALID_HIDDEN_SIZE")))
+        learning_rate = float(params.get("learning_rate", 0.01))
+        if learning_rate <= 0:
+            raise ValueError("SEQUENCE_INVALID_LEARNING_RATE")
+        validation_ratio = float(params.get("validation_ratio", 0.2))
+        if not 0 < validation_ratio < 0.8:
+            raise ValueError("SEQUENCE_INVALID_VALIDATION_RATIO")
+        seed = int(params.get("seed", 42))
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        samples = self._sequence_samples(rows, time_column, target_column, group_column, feature_columns, window, horizon)
+        if len(samples) < 2:
+            raise ValueError("SEQUENCE_NOT_ENOUGH_WINDOWS")
+        split_index = max(1, min(len(samples) - 1, int(len(samples) * (1 - validation_ratio))))
+        train_samples = samples[:split_index]
+        validation_samples = samples[split_index:]
+        x_train = np.array([sample[0] for sample in train_samples], dtype=np.float32)
+        y_train = np.array([sample[1] for sample in train_samples], dtype=np.float32).reshape(-1, 1)
+        x_validation = np.array([sample[0] for sample in validation_samples], dtype=np.float32)
+        y_validation = np.array([sample[1] for sample in validation_samples], dtype=np.float32).reshape(-1, 1)
+
+        feature_mean = x_train.mean(axis=(0, 1), keepdims=True)
+        feature_std = x_train.std(axis=(0, 1), keepdims=True)
+        feature_std[feature_std == 0] = 1.0
+        target_mean = y_train.mean(axis=0, keepdims=True)
+        target_std = y_train.std(axis=0, keepdims=True)
+        target_std[target_std == 0] = 1.0
+        x_train = (x_train - feature_mean) / feature_std
+        x_validation = (x_validation - feature_mean) / feature_std
+        y_train_scaled = (y_train - target_mean) / target_std
+
+        class SequenceRegressor(nn.Module):
+            def __init__(self, input_size: int, hidden_size: int):
+                super().__init__()
+                self.encoder = nn.LSTM(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+                self.head = nn.Linear(hidden_size, 1)
+
+            def forward(self, values):
+                _, (hidden, _) = self.encoder(values)
+                return self.head(hidden[-1])
+
+        model = SequenceRegressor(len(feature_columns), hidden_size)
+        warm_start_model = str(params.get("warm_start_model", "")).strip()
+        if warm_start_model:
+            self._load_sequence_warm_start(model, warm_start_model, len(feature_columns), hidden_size, window, horizon)
+
+        progress(55, "Training sequence model")
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        loss_fn = nn.MSELoss()
+        x_tensor = torch.tensor(x_train, dtype=torch.float32)
+        y_tensor = torch.tensor(y_train_scaled, dtype=torch.float32)
+        model.train()
+        for _ in range(epochs):
+            optimizer.zero_grad()
+            loss = loss_fn(model(x_tensor), y_tensor)
+            loss.backward()
+            optimizer.step()
+
+        progress(85, "Scoring validation windows")
+        model.eval()
+        with torch.no_grad():
+            prediction_scaled = model(torch.tensor(x_validation, dtype=torch.float32)).numpy()
+        predictions = (prediction_scaled * target_std + target_mean).reshape(-1).astype(float).tolist()
+        targets = y_validation.reshape(-1).astype(float).tolist()
+        metrics = self._regression_metrics(targets, predictions)
+        metrics["rows"] = len(targets)
+        metrics["train_windows"] = len(train_samples)
+        metrics["validation_windows"] = len(validation_samples)
+        if group_column:
+            metrics["groups"] = len({sample[2] for sample in samples})
+
+        weights_file = self.home / "jobs" / job["id"] / "model.pt"
+        weights_file.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "state_dict": model.state_dict(),
+                "input_size": len(feature_columns),
+                "hidden_size": hidden_size,
+                "window": window,
+                "horizon": horizon,
+            },
+            weights_file,
+        )
+        self._record_sequence_prediction_result(job, version, targets, predictions)
+        payload = {
+            "modelKind": "sequence_forecast",
+            "targetColumn": target_column,
+            "timeColumn": time_column,
+            "groupColumn": group_column,
+            "featureColumns": feature_columns,
+            "window": window,
+            "horizon": horizon,
+            "hiddenSize": hidden_size,
+            "epochs": epochs,
+            "learningRate": learning_rate,
+            "validationRatio": validation_ratio,
+            "warmStartModel": warm_start_model,
+            "normalization": {
+                "featureMean": feature_mean.reshape(-1).astype(float).tolist(),
+                "featureStd": feature_std.reshape(-1).astype(float).tolist(),
+                "targetMean": float(target_mean.reshape(-1)[0]),
+                "targetStd": float(target_std.reshape(-1)[0]),
+            },
+        }
+        return metrics, payload, weights_file
+
+    def _parse_sequence_features(self, raw_features: object | None, target_column: str) -> list[str]:
+        if raw_features is None or str(raw_features).strip() == "":
+            return [target_column]
+        features = [part.strip() for part in str(raw_features).split(",") if part.strip()]
+        if not features:
+            raise ValueError("SEQUENCE_FEATURES_REQUIRED")
+        return features
+
+    def _positive_int(self, raw_value: object, error_code: str) -> int:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(error_code)
+        if value <= 0:
+            raise ValueError(error_code)
+        return value
+
+    def _sequence_samples(
+        self,
+        rows: list[dict],
+        time_column: str,
+        target_column: str,
+        group_column: str,
+        feature_columns: list[str],
+        window: int,
+        horizon: int,
+    ) -> list[tuple[list[list[float]], float, object]]:
+        groups: dict[object, list[dict]] = {}
+        for row in rows:
+            key = row[group_column] if group_column else "__default__"
+            groups.setdefault(key, []).append(row)
+        samples = []
+        for key, group_rows in sorted(groups.items(), key=lambda item: str(item[0])):
+            ordered = sorted(group_rows, key=lambda row: row[time_column])
+            for row in ordered:
+                if not isinstance(row[target_column], (int, float)):
+                    raise ValueError("SEQUENCE_TARGET_MUST_BE_NUMERIC")
+                for column in feature_columns:
+                    if not isinstance(row[column], (int, float)):
+                        raise ValueError("SEQUENCE_FEATURE_MUST_BE_NUMERIC")
+            for index in range(window, len(ordered) - horizon + 1):
+                features = [[float(ordered[offset][column]) for column in feature_columns] for offset in range(index - window, index)]
+                target = float(ordered[index + horizon - 1][target_column])
+                samples.append((features, target, key))
+        return samples
+
+    def _load_sequence_warm_start(self, model, reference: str, input_size: int, hidden_size: int, window: int, horizon: int) -> None:
+        if ":" not in reference:
+            raise ValueError("SEQUENCE_WARM_START_INVALID")
+        name, version = reference.split(":", 1)
+        row = self.conn.execute("SELECT run_id, artifact_path FROM model_versions WHERE name = ? AND version = ?", (name, version)).fetchone()
+        if not row:
+            raise ValueError("SEQUENCE_WARM_START_NOT_FOUND")
+        model_json = self.home / "mlruns" / row["run_id"] / row["artifact_path"] / "model.json"
+        weights = self.home / "mlruns" / row["run_id"] / row["artifact_path"] / "model.pt"
+        if not model_json.exists() or not weights.exists():
+            raise ValueError("SEQUENCE_WARM_START_NOT_FOUND")
+        payload = json.loads(model_json.read_text(encoding="utf-8"))
+        if payload.get("modelKind") != "sequence_forecast":
+            raise ValueError("SEQUENCE_WARM_START_INCOMPATIBLE")
+        if payload.get("window") != window or payload.get("horizon") != horizon or payload.get("hiddenSize") != hidden_size:
+            raise ValueError("SEQUENCE_WARM_START_INCOMPATIBLE")
+        import torch
+
+        try:
+            checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(weights, map_location="cpu")
+        if checkpoint.get("input_size") != input_size or checkpoint.get("hidden_size") != hidden_size:
+            raise ValueError("SEQUENCE_WARM_START_INCOMPATIBLE")
+        try:
+            model.load_state_dict(checkpoint["state_dict"])
+        except Exception as exc:
+            raise ValueError("SEQUENCE_WARM_START_INCOMPATIBLE") from exc
+
+    def _record_sequence_prediction_result(self, job: dict, version: dict, targets: list[float], predictions: list[float]) -> None:
+        import numpy as np
+
+        result_id = f"er_{uuid4().hex[:12]}"
+        source_path = self.home / "jobs" / job["id"] / "predictions.npz"
+        np.savez(source_path, y_true=np.array(targets), y_pred=np.array(predictions))
+        artifact_uri = f"s3://experiment-results/{result_id}/predictions.npz"
+        self.storage.put_file(artifact_uri, source_path)
+        metrics = self._regression_metrics(targets, predictions)
+        metrics["rows"] = len(targets)
+        dataset_ref = f"{version['datasetId']}@{version['version']}"
+        self.conn.execute(
+            """
+            INSERT INTO experiment_results(
+              id, experiment_name, method_id, method_kind, dataset_ref,
+              metrics, artifact_uri, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (result_id, job["experimentName"], job["templateId"], "sequence", dataset_ref, dump(metrics), artifact_uri, job["owner"], now()),
+        )
 
     def _parse_mstl_periods(self, raw_periods: object | None) -> list[int]:
         if raw_periods is None:
