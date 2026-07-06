@@ -1,5 +1,7 @@
 const state = {
   dashboard: null,
+  projects: [],
+  currentProjectId: null,
   selectedRun: null,
   activeView: "dashboard",
   selected: {
@@ -124,7 +126,10 @@ async function refresh() {
   setHealth("checking");
   try {
     await api("/healthz");
-    state.dashboard = await api("/api/v1/dashboard");
+    state.dashboard = state.currentProjectId
+      ? await api(`/api/v1/projects/${encodeURIComponent(state.currentProjectId)}/dashboard`)
+      : await api("/api/v1/dashboard");
+    state.projects = state.dashboard.projects || [];
     state.selectedRun = state.dashboard.runs[0] || null;
     render();
     setHealth("ok");
@@ -142,13 +147,24 @@ function setHealth(status) {
 
 function render() {
   const { summary, datasets, jobs, runs, models } = state.dashboard;
+  const inProject = Boolean(state.currentProjectId);
   ensureSelections();
+  document.body.classList.toggle("project-mode", inProject);
+  document.body.classList.toggle("workspace-mode", !inProject);
+  renderProjectCards();
+  $("#projectLanding").hidden = inProject;
+  $("#projectWorkspace").hidden = !inProject;
+  $("#projectBackButton").hidden = !inProject;
+  $("#lastUpdated").textContent = `Synced ${new Date().toLocaleTimeString()}`;
+  if (!inProject) {
+    applyView("dashboard");
+    return;
+  }
   $("#metricDatasets").textContent = summary.datasets;
   $("#metricJobs").textContent = summary.jobs;
   $("#metricRuns").textContent = summary.runs;
   $("#metricModels").textContent = summary.models;
   $("#metricTests").textContent = summary.evaluations;
-  $("#lastUpdated").textContent = `Synced ${new Date().toLocaleTimeString()}`;
   $("#emptyState").classList.toggle("visible", summary.datasets === 0 && summary.jobs === 0 && summary.models === 0);
 
   $("#datasetCount").textContent = `${datasets.length} records`;
@@ -211,6 +227,31 @@ function render() {
   renderLineage();
   renderChart(runs);
   applyView(state.activeView);
+}
+
+function renderProjectCards() {
+  const projects = state.projects || [];
+  $("#projectCount").textContent = `${projects.length} records`;
+  $("#projectCards").innerHTML = projects.length
+    ? projects
+        .map((project) => {
+          const summary = project.summary || {};
+          return `
+            <button class="project-card" type="button" data-select-project="${escapeHtml(project.id)}">
+              <span class="project-card-title">${escapeHtml(project.name)}</span>
+              <span class="project-card-description">${escapeHtml(project.description || project.id)}</span>
+              <span class="project-card-meta">${escapeHtml(project.owner)} · ${escapeHtml(project.team)} · ${escapeHtml(project.status)}</span>
+              <span class="project-card-stats">
+                <span>${summary.datasets || 0} datasets</span>
+                <span>${summary.jobs || 0} jobs</span>
+                <span>${summary.runs || 0} runs</span>
+                <span>${summary.models || 0} models</span>
+              </span>
+            </button>
+          `;
+        })
+        .join("")
+    : `<p class="muted">No projects</p>`;
 }
 
 function ensureSelections() {
@@ -488,6 +529,8 @@ function renderDatasetDetail() {
       ["Type", escapeHtml(dataset.type)],
       ["Owner", escapeHtml(dataset.owner)],
       ["Team", escapeHtml(dataset.team)],
+      ["Domain", escapeHtml(dataset.domain || "empty")],
+      ["Source", escapeHtml(dataset.sourceSystem || "empty")],
       ["Visibility", escapeHtml(dataset.visibility)],
       ["Tags", escapeHtml((dataset.tags || []).join(", ") || "empty")],
       ["Created", escapeHtml(dataset.createdAt)],
@@ -517,6 +560,7 @@ function renderJobDetail() {
     detailList([
       ["ID", `<span class="mono">${escapeHtml(job.id)}</span>`],
       ["Template", escapeHtml(job.templateId)],
+      ["Project", `<span class="mono">${escapeHtml(job.projectId || "empty")}</span>`],
       ["Status", pill(job.status)],
       ["Progress", progressBar(job.progressPercent, job.statusMessage)],
       ["Dataset Version ID", `<span class="mono">${escapeHtml(job.datasetVersionId)}</span>`],
@@ -558,6 +602,7 @@ function renderRunDetail() {
       ["ID", `<span class="mono">${escapeHtml(run.id)}</span>`],
       ["Status", pill(run.status)],
       ["Experiment", escapeHtml(run.experimentName)],
+      ["Project", `<span class="mono">${escapeHtml(run.platform?.projectId || run.tags?.["platform.projectId"] || "empty")}</span>`],
       ["Job", `<span class="mono">${escapeHtml(run.platform?.jobId || "empty")}</span>`],
       ["Dataset", escapeHtml(run.tags?.dataset_version || "")],
       ["Model Registry", registryValue],
@@ -710,6 +755,7 @@ async function submitModelRegistration(event) {
 }
 
 async function openTrainingForm() {
+  if (!state.currentProjectId) return;
   state.trainingForm.open = true;
   state.trainingForm.error = "";
   renderTrainingForm();
@@ -772,6 +818,7 @@ async function submitTrainingJob(event) {
     const job = await api("/api/v1/training/jobs", {
       method: "POST",
       body: JSON.stringify({
+        projectId: state.currentProjectId,
         templateId: data.get("templateId"),
         datasetRef: data.get("datasetRef"),
         experimentName: data.get("experimentName"),
@@ -856,7 +903,7 @@ async function runFullTest() {
   if (button) button.textContent = "Creating example workspace";
   emptyButton.textContent = "Creating example workspace";
   try {
-    await api("/api/v1/demo/full-test", { method: "POST", body: "{}" });
+    await api("/api/v1/demo/full-test", { method: "POST", body: JSON.stringify({ projectId: state.currentProjectId }) });
     await refresh();
   } finally {
     if (button) button.disabled = false;
@@ -867,6 +914,7 @@ async function runFullTest() {
 }
 
 function applyView(view) {
+  if (!state.currentProjectId && view !== "dashboard") view = "dashboard";
   state.activeView = view;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".dashboard-view").forEach((section) => section.classList.toggle("active", section.id === view));
@@ -879,7 +927,8 @@ function applyView(view) {
     models: "Models",
     tests: "Evaluations",
   };
-  document.querySelector("h1").textContent = titles[view] || "Workspace";
+  const project = state.dashboard?.project;
+  document.querySelector("h1").textContent = project ? project.name : "Projects";
   const selectedByView = {
     datasets: ["dataset", state.selected.dataset],
     training: ["job", state.selected.job],
@@ -900,6 +949,12 @@ function bindNav() {
 }
 
 document.addEventListener("click", (event) => {
+  const projectButton = event.target.closest("[data-select-project]");
+  if (projectButton) {
+    event.preventDefault();
+    selectProject(projectButton.dataset.selectProject);
+    return;
+  }
   const listToggle = event.target.closest("[data-toggle-list]");
   if (listToggle) {
     event.preventDefault();
@@ -942,6 +997,22 @@ document.addEventListener("click", (event) => {
   selectResource(row.dataset.resourceType, row.dataset.resourceId);
 });
 
+async function selectProject(projectId) {
+  state.currentProjectId = projectId;
+  state.activeView = "dashboard";
+  state.details = {};
+  state.trainingForm.versions = [];
+  await refresh();
+}
+
+async function showProjects() {
+  state.currentProjectId = null;
+  state.activeView = "dashboard";
+  state.details = {};
+  state.trainingForm.versions = [];
+  await refresh();
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   const runButton = event.target.closest("[data-jump-run]");
@@ -959,6 +1030,7 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("submit", submitModelRegistration);
 
 $("#refreshButton").addEventListener("click", refresh);
+$("#projectBackButton").addEventListener("click", showProjects);
 $("#fullTestButton")?.addEventListener("click", runFullTest);
 $("#emptyImportButton").addEventListener("click", runFullTest);
 $("#newJobButton").addEventListener("click", openTrainingForm);

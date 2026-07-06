@@ -30,10 +30,39 @@ def public_dataset(row: dict) -> dict:
         "owner": row["owner"],
         "team": row["team"],
         "tags": load(row["tags"]),
+        "domain": row["domain"],
+        "sourceSystem": row["source_system"],
         "status": row["status"],
         "visibility": row["visibility"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+    }
+
+
+def public_project(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"],
+        "owner": row["owner"],
+        "team": row["team"],
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def public_project_dataset_link(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "datasetId": row["dataset_id"],
+        "role": row["role"],
+        "versionPolicy": row["version_policy"],
+        "pinnedVersion": row["pinned_version"],
+        "addedBy": row["added_by"],
+        "addedAt": row["added_at"],
+        "notes": row["notes"],
     }
 
 
@@ -71,6 +100,7 @@ def public_job(row: dict) -> dict:
         message = "Canceled"
     return {
         "id": row["id"],
+        "projectId": row["project_id"],
         "templateId": row["template_id"],
         "datasetVersionId": row["dataset_version_id"],
         "experimentName": row["experiment_name"],
@@ -117,11 +147,199 @@ class CortexApp:
         self.storage = ObjectStorage(self.home / "objects")
         self.mlflow = LocalMlflow(self.conn, self.home / "mlruns")
         (self.home / "jobs").mkdir(exist_ok=True)
+        self.ensure_default_project()
 
     @classmethod
     def open(cls, home: str | Path | None = None) -> "CortexApp":
         resolved = Path(home or os.environ.get("CORTEX_HOME", ".cortex")).expanduser().resolve()
         return cls(resolved)
+
+    def ensure_default_project(self) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM projects WHERE id = 'proj_default'").fetchone())
+        if row:
+            self._backfill_default_project_dataset_links()
+            return public_project(row)
+        ts = now()
+        self.conn.execute(
+            """
+            INSERT INTO projects(id, name, description, owner, team, status, created_at, updated_at)
+            VALUES ('proj_default', 'Default Project', 'Legacy workspace assets', 'system', 'default', 'active', ?, ?)
+            """,
+            (ts, ts),
+        )
+        self.conn.commit()
+        self._backfill_default_project_dataset_links()
+        return self.get_project("proj_default")
+
+    def _backfill_default_project_dataset_links(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT d.id, d.owner
+            FROM datasets d
+            LEFT JOIN project_dataset_links l
+              ON l.project_id = 'proj_default' AND l.dataset_id = d.id
+            WHERE l.id IS NULL
+            """
+        ).fetchall()
+        if not rows:
+            return
+        ts = now()
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO project_dataset_links(id, project_id, dataset_id, role, version_policy, added_by, added_at, notes)
+                VALUES (?, 'proj_default', ?, 'train', 'latest', ?, ?, 'legacy workspace backfill')
+                """,
+                (f"pdl_{uuid4().hex[:12]}", row["id"], row["owner"] or "system", ts),
+            )
+        self.conn.commit()
+
+    def get_default_project(self) -> dict:
+        return self.ensure_default_project()
+
+    def create_project(self, name: str, owner: str, team: str, description: str = "", status: str = "active") -> dict:
+        project_id = "proj_" + "".join(c if c.isalnum() else "_" for c in name.lower()).strip("_")
+        existing = self.conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if existing:
+            project_id = f"{project_id}_{uuid4().hex[:6]}"
+        ts = now()
+        self.conn.execute(
+            """
+            INSERT INTO projects(id, name, description, owner, team, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, name, description, owner, team, status, ts, ts),
+        )
+        self.audit(owner, team, "project.create", "project", project_id, {"name": name})
+        self.conn.commit()
+        return self.get_project(project_id)
+
+    def get_project(self, project_id: str) -> dict:
+        row = decode_row(self.conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+        if not row:
+            raise ValueError("PROJECT_NOT_FOUND")
+        project = public_project(row)
+        project["summary"] = self.project_summary(project_id)
+        return project
+
+    def list_projects(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+        return [self.get_project(row["id"]) for row in rows]
+
+    def project_summary(self, project_id: str) -> dict:
+        dataset_count = self.conn.execute("SELECT COUNT(*) AS count FROM project_dataset_links WHERE project_id = ?", (project_id,)).fetchone()["count"]
+        job_count = self.conn.execute("SELECT COUNT(*) AS count FROM training_jobs WHERE project_id = ?", (project_id,)).fetchone()["count"]
+        run_count = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM runs r
+            JOIN training_jobs j ON j.mlflow_run_id = r.id
+            WHERE j.project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()["count"]
+        model_count = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT l.registered_model_name) AS count
+            FROM dataset_run_links l
+            JOIN training_jobs j ON j.id = l.job_id
+            WHERE j.project_id = ? AND l.registered_model_name IS NOT NULL
+            """,
+            (project_id,),
+        ).fetchone()["count"]
+        return {"datasets": dataset_count, "jobs": job_count, "runs": run_count, "models": model_count}
+
+    def link_project_dataset(
+        self,
+        project_id: str,
+        dataset_id: str,
+        role: str = "train",
+        version_policy: str = "latest",
+        pinned_version: str | None = None,
+        added_by: str = "unknown",
+        notes: str = "",
+    ) -> dict:
+        project = self.get_project(project_id)
+        dataset = self.get_dataset(dataset_id)
+        if version_policy not in {"latest", "pinned"}:
+            raise ValueError("VERSION_POLICY_INVALID")
+        if version_policy == "pinned":
+            if not pinned_version:
+                raise ValueError("PINNED_VERSION_REQUIRED")
+            self.get_dataset_version(dataset_id, pinned_version)
+        link_id = f"pdl_{uuid4().hex[:12]}"
+        self.conn.execute(
+            """
+            INSERT INTO project_dataset_links(id, project_id, dataset_id, role, version_policy, pinned_version, added_by, added_at, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, dataset_id) DO UPDATE SET
+              role = excluded.role,
+              version_policy = excluded.version_policy,
+              pinned_version = excluded.pinned_version,
+              added_by = excluded.added_by,
+              added_at = excluded.added_at,
+              notes = excluded.notes
+            """,
+            (link_id, project_id, dataset_id, role, version_policy, pinned_version, added_by, now(), notes),
+        )
+        self.audit(added_by, project["team"], "project.dataset.link", "dataset", dataset_id, {"projectId": project_id, "visibility": dataset["visibility"]})
+        self.conn.commit()
+        return self.get_project_dataset_link(project_id, dataset_id)
+
+    def get_project_dataset_link(self, project_id: str, dataset_id: str) -> dict:
+        row = decode_row(
+            self.conn.execute(
+                "SELECT * FROM project_dataset_links WHERE project_id = ? AND dataset_id = ?",
+                (project_id, dataset_id),
+            ).fetchone()
+        )
+        if not row:
+            raise ValueError("PROJECT_DATASET_LINK_NOT_FOUND")
+        return public_project_dataset_link(row)
+
+    def list_project_datasets(self, project_id: str) -> list[dict]:
+        self.get_project(project_id)
+        rows = self.conn.execute(
+            """
+            SELECT d.*, l.id AS link_id, l.project_id, l.dataset_id AS link_dataset_id, l.role,
+                   l.version_policy, l.pinned_version, l.added_by, l.added_at, l.notes
+            FROM project_dataset_links l
+            JOIN datasets d ON d.id = l.dataset_id
+            WHERE l.project_id = ?
+            ORDER BY l.added_at DESC
+            """,
+            (project_id,),
+        ).fetchall()
+        datasets = []
+        for row in rows:
+            dataset = public_dataset(decode_row(row))
+            versions = self.list_dataset_versions(dataset["id"])
+            dataset["versionCount"] = len(versions)
+            dataset["latestVersion"] = versions[0]["version"] if versions else ""
+            dataset["projectLink"] = public_project_dataset_link(
+                {
+                    "id": row["link_id"],
+                    "project_id": row["project_id"],
+                    "dataset_id": row["link_dataset_id"],
+                    "role": row["role"],
+                    "version_policy": row["version_policy"],
+                    "pinned_version": row["pinned_version"],
+                    "added_by": row["added_by"],
+                    "added_at": row["added_at"],
+                    "notes": row["notes"],
+                }
+            )
+            datasets.append(dataset)
+        return datasets
+
+    def _ensure_project_dataset_access(self, project_id: str, dataset_id: str) -> None:
+        self.get_project(project_id)
+        row = self.conn.execute(
+            "SELECT 1 FROM project_dataset_links WHERE project_id = ? AND dataset_id = ?",
+            (project_id, dataset_id),
+        ).fetchone()
+        if row:
+            return
+        raise ValueError("DATASET_NOT_LINKED_TO_PROJECT")
 
     def create_dataset(
         self,
@@ -132,6 +350,9 @@ class CortexApp:
         description: str = "",
         tags: list[str] | None = None,
         visibility: str = "team",
+        project_id: str | None = None,
+        domain: str = "",
+        source_system: str = "",
     ) -> dict:
         dataset_id = "ds_" + "".join(c if c.isalnum() else "_" for c in name.lower()).strip("_")
         existing = self.conn.execute("SELECT id FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
@@ -140,13 +361,14 @@ class CortexApp:
         ts = now()
         self.conn.execute(
             """
-            INSERT INTO datasets(id, name, description, type, owner, team, tags, visibility, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO datasets(id, name, description, type, owner, team, tags, visibility, domain, source_system, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (dataset_id, name, description, dataset_type, owner, team, dump(tags or []), visibility, ts, ts),
+            (dataset_id, name, description, dataset_type, owner, team, dump(tags or []), visibility, domain, source_system, ts, ts),
         )
         self.audit(owner, team, "dataset.create", "dataset", dataset_id, {"name": name})
         self.conn.commit()
+        self.link_project_dataset(project_id or self.get_default_project()["id"], dataset_id, role="train", added_by=owner)
         return self.get_dataset(dataset_id)
 
     def get_dataset(self, dataset_id: str) -> dict:
@@ -155,11 +377,28 @@ class CortexApp:
             raise ValueError("DATASET_NOT_FOUND")
         return public_dataset(row)
 
-    def list_datasets(self) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM datasets ORDER BY created_at DESC").fetchall()
+    def list_datasets(self, *, tag: str | None = None, domain: str | None = None, dataset_type: str | None = None, status: str | None = None) -> list[dict]:
+        clauses = []
+        params = []
+        if domain:
+            clauses.append("domain = ?")
+            params.append(domain)
+        if dataset_type:
+            clauses.append("type = ?")
+            params.append(dataset_type)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM datasets"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC"
+        rows = self.conn.execute(sql, params).fetchall()
         datasets = []
         for row in rows:
             dataset = public_dataset(decode_row(row))
+            if tag and tag not in dataset["tags"]:
+                continue
             versions = self.list_dataset_versions(dataset["id"])
             dataset["versionCount"] = len(versions)
             dataset["latestVersion"] = versions[0]["version"] if versions else ""
@@ -243,8 +482,9 @@ class CortexApp:
         owner: str,
         team: str,
         wait: bool = False,
+        project_id: str | None = None,
     ) -> dict:
-        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team)
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id)
         self._run_job(job["id"])
         return self.get_training_job(job["id"])
 
@@ -256,8 +496,9 @@ class CortexApp:
         params: dict,
         owner: str,
         team: str,
+        project_id: str | None = None,
     ) -> dict:
-        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team)
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id)
         threading.Thread(target=self._run_job_in_background, args=(job["id"],), daemon=True).start()
         print(f"training job accepted id={job['id']} template={template_id} dataset={dataset_ref}", file=sys.stderr, flush=True)
         return job
@@ -273,11 +514,14 @@ class CortexApp:
         params: dict,
         owner: str,
         team: str,
+        project_id: str | None = None,
     ) -> dict:
         template = self.conn.execute("SELECT * FROM training_templates WHERE id = ? AND enabled = 1", (template_id,)).fetchone()
         if not template:
             raise ValueError("TEMPLATE_NOT_FOUND")
+        project_id = project_id or self.get_default_project()["id"]
         version = self.parse_dataset_ref(dataset_ref)
+        self._ensure_project_dataset_access(project_id, version["datasetId"])
         if not version["trainable"] or version["checksumStatus"] != "verified":
             raise ValueError("DATASET_NOT_TRAINABLE")
         dataset = self.get_dataset(version["datasetId"])
@@ -286,6 +530,7 @@ class CortexApp:
         job_id = f"job_{uuid4().hex[:12]}"
         tags = {
             "platform.jobId": job_id,
+            "platform.projectId": project_id,
             "model_type": template["model_type"],
             "dataset_version": dataset_ref,
             "dataset_checksum": version["checksum"],
@@ -300,11 +545,11 @@ class CortexApp:
         self.conn.execute(
             """
             INSERT INTO training_jobs(
-              id, template_id, dataset_version_id, experiment_name, params, status,
+              id, project_id, template_id, dataset_version_id, experiment_name, params, status,
               mlflow_run_id, log_uri, owner, team, created_at
-            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
             """,
-            (job_id, template_id, version["id"], experiment_name, dump(params), run_id, str(log_path), owner, team, ts),
+            (job_id, project_id, template_id, version["id"], experiment_name, dump(params), run_id, str(log_path), owner, team, ts),
         )
         self.conn.execute(
             """
@@ -508,8 +753,11 @@ class CortexApp:
             raise ValueError("JOB_NOT_FOUND")
         return public_job(row)
 
-    def list_training_jobs(self) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM training_jobs ORDER BY created_at DESC").fetchall()
+    def list_training_jobs(self, project_id: str | None = None) -> list[dict]:
+        if project_id:
+            rows = self.conn.execute("SELECT * FROM training_jobs WHERE project_id = ? ORDER BY created_at DESC", (project_id,)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM training_jobs ORDER BY created_at DESC").fetchall()
         return [public_job(decode_row(row)) for row in rows]
 
     def get_job_logs(self, job_id: str) -> str:
@@ -534,22 +782,41 @@ class CortexApp:
         version_row = decode_row(self.conn.execute("SELECT * FROM dataset_versions WHERE id = ?", (job["datasetVersionId"],)).fetchone())
         version = public_version(version_row)
         dataset_ref = f"{version['datasetId']}@{version['version']}"
-        return self.submit_training_job(job["templateId"], dataset_ref, job["experimentName"], job["params"], job["owner"], job["team"], wait=wait)
+        return self.submit_training_job(job["templateId"], dataset_ref, job["experimentName"], job["params"], job["owner"], job["team"], wait=wait, project_id=job["projectId"])
 
     def get_run(self, run_id: str) -> dict:
         run = self.mlflow.get_run(run_id)
         if not run:
             raise ValueError("RUN_NOT_FOUND")
-        link = self.conn.execute("SELECT job_id FROM dataset_run_links WHERE mlflow_run_id = ?", (run_id,)).fetchone()
+        link = self.conn.execute(
+            """
+            SELECT l.job_id, j.project_id
+            FROM dataset_run_links l
+            JOIN training_jobs j ON j.id = l.job_id
+            WHERE l.mlflow_run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
         if link:
-            run["platform"] = {"jobId": link["job_id"]}
+            run["platform"] = {"jobId": link["job_id"], "projectId": link["project_id"]}
         return run
 
     def list_run_artifacts(self, run_id: str) -> list[str]:
         return self.mlflow.list_artifacts(run_id)
 
-    def list_runs(self) -> list[dict]:
-        rows = self.conn.execute("SELECT id FROM runs ORDER BY created_at DESC").fetchall()
+    def list_runs(self, project_id: str | None = None) -> list[dict]:
+        if project_id:
+            rows = self.conn.execute(
+                """
+                SELECT r.id FROM runs r
+                JOIN training_jobs j ON j.mlflow_run_id = r.id
+                WHERE j.project_id = ?
+                ORDER BY r.created_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT id FROM runs ORDER BY created_at DESC").fetchall()
         return [self.get_run(row["id"]) for row in rows]
 
     def register_model_version(self, name: str, run_id: str, artifact_path: str, description: str = "", tags: dict | None = None) -> dict:
@@ -597,14 +864,24 @@ class CortexApp:
     def list_model_aliases(self, name: str) -> dict[str, str]:
         return self.mlflow.list_aliases(name)
 
-    def list_models(self) -> list[dict]:
+    def list_models(self, project_id: str | None = None) -> list[dict]:
         rows = self.conn.execute("SELECT name, created_at FROM registered_models ORDER BY created_at DESC").fetchall()
+        allowed_runs = None
+        if project_id:
+            allowed_runs = {
+                row["mlflow_run_id"]
+                for row in self.conn.execute("SELECT mlflow_run_id FROM training_jobs WHERE project_id = ?", (project_id,)).fetchall()
+            }
         models = []
         for row in rows:
             versions = self.conn.execute(
                 "SELECT version, run_id, artifact_path, description, tags, created_at FROM model_versions WHERE name = ? ORDER BY CAST(version AS INTEGER) DESC",
                 (row["name"],),
             ).fetchall()
+            if allowed_runs is not None:
+                versions = [version for version in versions if version["run_id"] in allowed_runs]
+                if not versions:
+                    continue
             models.append(
                 {
                     "name": row["name"],
@@ -695,8 +972,19 @@ class CortexApp:
             raise ValueError("EVALUATION_NOT_FOUND")
         return public_evaluation(row)
 
-    def list_evaluations(self) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC").fetchall()
+    def list_evaluations(self, project_id: str | None = None) -> list[dict]:
+        if project_id:
+            rows = self.conn.execute(
+                """
+                SELECT e.* FROM evaluations e
+                JOIN training_jobs j ON j.mlflow_run_id = e.run_id
+                WHERE j.project_id = ?
+                ORDER BY e.created_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC").fetchall()
         return [public_evaluation(decode_row(row)) for row in rows]
 
     def list_alias_audits(self, name: str) -> list[dict]:
@@ -719,7 +1007,7 @@ class CortexApp:
         version = self.parse_dataset_ref(dataset_ref)
         rows = self.conn.execute(
             """
-            SELECT l.*, j.status AS job_status FROM dataset_run_links l
+            SELECT l.*, j.status AS job_status, j.project_id FROM dataset_run_links l
             JOIN training_jobs j ON j.id = l.job_id
             WHERE l.dataset_version_id = ?
             ORDER BY l.created_at
@@ -729,6 +1017,7 @@ class CortexApp:
         return [
             {
                 "datasetVersionId": row["dataset_version_id"],
+                "projectId": row["project_id"],
                 "jobId": row["job_id"],
                 "jobStatus": row["job_status"],
                 "mlflowRunId": row["mlflow_run_id"],
@@ -739,15 +1028,18 @@ class CortexApp:
             for row in rows
         ]
 
-    def dashboard(self) -> dict:
-        datasets = self.list_datasets()
-        jobs = self.list_training_jobs()
-        runs = self.list_runs()
-        models = self.list_models()
-        evaluations = self.list_evaluations()
+    def dashboard(self, project_id: str | None = None) -> dict:
+        project = self.get_project(project_id) if project_id else None
+        datasets = self.list_project_datasets(project_id) if project_id else self.list_datasets()
+        jobs = self.list_training_jobs(project_id=project_id)
+        runs = self.list_runs(project_id=project_id)
+        models = self.list_models(project_id=project_id)
+        evaluations = self.list_evaluations(project_id=project_id)
         succeeded = sum(1 for job in jobs if job["status"] == "succeeded")
         failed = sum(1 for job in jobs if job["status"] == "failed")
         return {
+            "project": project,
+            "projects": self.list_projects(),
             "summary": {
                 "datasets": len(datasets),
                 "datasetVersions": sum(dataset.get("versionCount", 0) for dataset in datasets),
@@ -767,7 +1059,7 @@ class CortexApp:
             "templates": self.list_templates(),
         }
 
-    def create_kmeans_demo(self) -> dict:
+    def create_kmeans_demo(self, project_id: str | None = None) -> dict:
         source = self.home / "demo-kmeans-blobs.csv"
         rows = [
             (-0.2, 0.1, "cluster_a"),
@@ -790,6 +1082,7 @@ class CortexApp:
             "ml",
             "Three synthetic clusters for Phase 1 verification",
             ["phase1", "kmeans"],
+            project_id=project_id,
         )
         version = self.add_dataset_version(
             dataset["id"],
@@ -800,7 +1093,7 @@ class CortexApp:
             split={"train": 1.0},
             created_by="alice",
         )
-        job = self.submit_training_job("sklearn-kmeans", f"{dataset['id']}@v1", "demo/kmeans-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True)
+        job = self.submit_training_job("sklearn-kmeans", f"{dataset['id']}@v1", "demo/kmeans-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True, project_id=project_id)
         run = self.get_run(job["mlflowRunId"])
         model_version = self.register_model_version("kmeans-blobs-model", run["id"], "model", "Synthetic three-cluster baseline", {"dataset_version": f"{dataset['id']}@v1"})
         aliases = self.set_model_alias("kmeans-blobs-model", "champion", model_version["version"], operator="alice", reason="ui demo workflow")
@@ -814,7 +1107,7 @@ class CortexApp:
             "lineage": self.dataset_lineage(f"{dataset['id']}@v1"),
         }
 
-    def create_full_test_demo(self) -> dict:
+    def create_full_test_demo(self, project_id: str | None = None) -> dict:
         train_source_v1 = self.home / "train-blobs-v1.csv"
         train_source_v2 = self.home / "train-blobs-v2.csv"
         test_source = self.home / "test-blobs.csv"
@@ -847,18 +1140,18 @@ class CortexApp:
         self.storage.put_file("s3://datasets/e2e-blobs/v2/train.csv", train_source_v2)
         self.storage.put_file("s3://datasets/e2e-blobs-test/v1/test.csv", test_source)
 
-        train_dataset = self.create_dataset("e2e-blobs", "tabular", "alice", "ml", "Training blobs with two versions", ["e2e", "train"])
+        train_dataset = self.create_dataset("e2e-blobs", "tabular", "alice", "ml", "Training blobs with two versions", ["e2e", "train"], project_id=project_id)
         train_v1 = self.add_dataset_version(train_dataset["id"], "v1", "s3://datasets/e2e-blobs/v1/train.csv", "csv", split={"train": 1.0}, created_by="alice")
         train_v2 = self.add_dataset_version(train_dataset["id"], "v2", "s3://datasets/e2e-blobs/v2/train.csv", "csv", split={"train": 1.0}, created_by="alice")
-        test_dataset = self.create_dataset("e2e-blobs-test", "eval_set", "alice", "ml", "Held-out KMeans test set", ["e2e", "test"])
+        test_dataset = self.create_dataset("e2e-blobs-test", "eval_set", "alice", "ml", "Held-out KMeans test set", ["e2e", "test"], project_id=project_id)
         test_v1 = self.add_dataset_version(test_dataset["id"], "v1", "s3://datasets/e2e-blobs-test/v1/test.csv", "csv", split={"test": 1.0}, created_by="alice")
-        job = self.submit_training_job("sklearn-kmeans", f"{train_dataset['id']}@v2", "demo/e2e-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True)
+        job = self.submit_training_job("sklearn-kmeans", f"{train_dataset['id']}@v2", "demo/e2e-blobs", {"n_clusters": 3, "random_state": 42}, "alice", "ml", wait=True, project_id=project_id)
         run = self.get_run(job["mlflowRunId"])
         model_version = self.register_model_version("e2e-blobs-model", run["id"], "model", "E2E training dataset v2 baseline", {"dataset_version": f"{train_dataset['id']}@v2"})
         aliases = self.set_model_alias("e2e-blobs-model", "challenger", model_version["version"], operator="alice", reason="browser e2e test")
         evaluation = self.evaluate_model_version("e2e-blobs-model", model_version["version"], f"{test_dataset['id']}@v1", "alice", "ml")
-        slow_training = self.create_slow_training_demo()
-        regression = self.create_regression_demo()
+        slow_training = self.create_slow_training_demo(project_id=project_id)
+        regression = self.create_regression_demo(project_id=project_id)
         return {
             "trainDataset": train_dataset,
             "trainVersions": [train_v1, train_v2],
@@ -877,7 +1170,7 @@ class CortexApp:
             "evaluation": evaluation,
         }
 
-    def create_slow_training_demo(self) -> dict:
+    def create_slow_training_demo(self, project_id: str | None = None) -> dict:
         source = self.home / "slow-blobs.csv"
         rows = []
         for i in range(1500):
@@ -890,7 +1183,7 @@ class CortexApp:
         source.write_text("x,y,label\n" + "".join(f"{x},{y},{label}\n" for x, y, label in rows), encoding="utf-8")
         storage_uri = "s3://datasets/slow-blobs/v1/train.csv"
         self.storage.put_file(storage_uri, source)
-        dataset = self.create_dataset("slow-blobs", "tabular", "alice", "ml", "Larger KMeans demo dataset with a five-second training floor", ["demo", "slow", "kmeans"])
+        dataset = self.create_dataset("slow-blobs", "tabular", "alice", "ml", "Larger KMeans demo dataset with a five-second training floor", ["demo", "slow", "kmeans"], project_id=project_id)
         version = self.add_dataset_version(
             dataset["id"],
             "v1",
@@ -902,7 +1195,7 @@ class CortexApp:
         )
         return {"dataset": dataset, "version": version}
 
-    def create_regression_demo(self) -> dict:
+    def create_regression_demo(self, project_id: str | None = None) -> dict:
         train_source = self.home / "regression-train.csv"
         test_source = self.home / "regression-test.csv"
         train_rows = []
@@ -935,9 +1228,9 @@ class CortexApp:
                 {"name": "price", "type": "float"},
             ]
         }
-        train_dataset = self.create_dataset("regression-houses", "tabular", "alice", "ml", "House price regression training data", ["demo", "regression"])
+        train_dataset = self.create_dataset("regression-houses", "tabular", "alice", "ml", "House price regression training data", ["demo", "regression"], project_id=project_id)
         train_version = self.add_dataset_version(train_dataset["id"], "v1", "s3://datasets/regression-houses/v1/train.csv", "csv", schema=schema, split={"train": 1.0}, created_by="alice")
-        test_dataset = self.create_dataset("regression-houses-test", "eval_set", "alice", "ml", "House price regression test data", ["demo", "regression", "test"])
+        test_dataset = self.create_dataset("regression-houses-test", "eval_set", "alice", "ml", "House price regression test data", ["demo", "regression", "test"], project_id=project_id)
         test_version = self.add_dataset_version(test_dataset["id"], "v1", "s3://datasets/regression-houses-test/v1/test.csv", "csv", schema=schema, split={"test": 1.0}, created_by="alice")
         return {"trainDataset": train_dataset, "trainVersion": train_version, "testDataset": test_dataset, "testVersion": test_version}
 

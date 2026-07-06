@@ -37,6 +37,7 @@
             <p id="lastUpdated">Not synced</p>
           </div>
           <div class="toolbar">
+            <button class="secondary-button" id="projectBackButton" hidden>Projects</button>
             <button class="icon-button" id="refreshButton" title="Refresh" aria-label="Refresh">
               <span aria-hidden="true">↻</span>
               <span>Refresh data</span>
@@ -45,79 +46,89 @@
         </header>
 
         <section id="dashboard" class="dashboard-view active">
-          <section class="metrics-grid" aria-label="Summary">
-            <button class="metric metric-link" data-view-target="datasets" type="button">
-              <span>Datasets</span>
-              <strong id="metricDatasets">0</strong>
-            </button>
-            <button class="metric metric-link" data-view-target="training" type="button">
-              <span>Jobs</span>
-              <strong id="metricJobs">0</strong>
-            </button>
-            <button class="metric metric-link" data-view-target="runs" type="button">
-              <span>Runs</span>
-              <strong id="metricRuns">0</strong>
-            </button>
-            <button class="metric metric-link" data-view-target="models" type="button">
-              <span>Models</span>
-              <strong id="metricModels">0</strong>
-            </button>
-            <button class="metric metric-link" data-view-target="tests" type="button">
-              <span>Tests</span>
-              <strong id="metricTests">0</strong>
-            </button>
-          </section>
-
-          <section class="empty-state" id="emptyState">
-            <div>
-              <h2>No ML assets yet</h2>
-              <p>Create a sample project to review dataset versioning, training runs, model registration, and evaluation results in one workspace.</p>
+          <section class="project-landing" id="projectLanding">
+            <div class="section-header">
+              <h2>Projects</h2>
+              <span id="projectCount">0 records</span>
             </div>
-            <button class="secondary-button" id="emptyImportButton">Create example workspace</button>
+            <div class="project-grid" id="projectCards"></div>
           </section>
 
-          <section class="workbench" id="overviewWorkbench">
-            <div class="panel lineage-panel">
-              <div class="panel-header">
-                <h2>Lineage</h2>
-                <span id="lineageLabel">No run selected</span>
+          <div id="projectWorkspace" hidden>
+            <section class="metrics-grid" aria-label="Summary">
+              <button class="metric metric-link" data-view-target="datasets" type="button">
+                <span>Datasets</span>
+                <strong id="metricDatasets">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="training" type="button">
+                <span>Jobs</span>
+                <strong id="metricJobs">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="runs" type="button">
+                <span>Runs</span>
+                <strong id="metricRuns">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="models" type="button">
+                <span>Models</span>
+                <strong id="metricModels">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="tests" type="button">
+                <span>Tests</span>
+                <strong id="metricTests">0</strong>
+              </button>
+            </section>
+
+            <section class="empty-state" id="emptyState">
+              <div>
+                <h2>No ML assets yet</h2>
+                <p>Create a sample project to review dataset versioning, training runs, model registration, and evaluation results in one workspace.</p>
               </div>
-              <svg class="lineage-map" viewBox="0 0 720 180" role="img" aria-label="Dataset to job to run to model lineage">
-                <defs>
-                  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 0 L 10 5 L 0 10 z"></path>
-                  </marker>
-                </defs>
-                <g class="edge">
-                  <line x1="160" y1="90" x2="270" y2="90"></line>
-                  <line x1="400" y1="90" x2="510" y2="90"></line>
-                </g>
-                <g class="node dataset-node">
-                  <rect x="20" y="45" width="140" height="90" rx="8"></rect>
-                  <text x="90" y="85">Dataset</text>
-                  <text x="90" y="110" id="lineageDataset">empty</text>
-                </g>
-                <g class="node job-node">
-                  <rect x="270" y="45" width="130" height="90" rx="8"></rect>
-                  <text x="335" y="85">Job / Run</text>
-                  <text x="335" y="110" id="lineageRun">empty</text>
-                </g>
-                <g class="node model-node">
-                  <rect x="510" y="45" width="170" height="90" rx="8"></rect>
-                  <text x="595" y="85">Model Alias</text>
-                  <text x="595" y="110" id="lineageModel">empty</text>
-                </g>
-              </svg>
-            </div>
+              <button class="secondary-button" id="emptyImportButton">Create example workspace</button>
+            </section>
 
-            <div class="panel chart-panel">
-              <div class="panel-header">
-                <h2>Run Metrics</h2>
-                <span>inertia / rows</span>
+            <section class="workbench" id="overviewWorkbench">
+              <div class="panel lineage-panel">
+                <div class="panel-header">
+                  <h2>Lineage</h2>
+                  <span id="lineageLabel">No run selected</span>
+                </div>
+                <svg class="lineage-map" viewBox="0 0 720 180" role="img" aria-label="Dataset to job to run to model lineage">
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                    </marker>
+                  </defs>
+                  <g class="edge">
+                    <line x1="160" y1="90" x2="270" y2="90"></line>
+                    <line x1="400" y1="90" x2="510" y2="90"></line>
+                  </g>
+                  <g class="node dataset-node">
+                    <rect x="20" y="45" width="140" height="90" rx="8"></rect>
+                    <text x="90" y="85">Dataset</text>
+                    <text x="90" y="110" id="lineageDataset">empty</text>
+                  </g>
+                  <g class="node job-node">
+                    <rect x="270" y="45" width="130" height="90" rx="8"></rect>
+                    <text x="335" y="85">Job / Run</text>
+                    <text x="335" y="110" id="lineageRun">empty</text>
+                  </g>
+                  <g class="node model-node">
+                    <rect x="510" y="45" width="170" height="90" rx="8"></rect>
+                    <text x="595" y="85">Model Alias</text>
+                    <text x="595" y="110" id="lineageModel">empty</text>
+                  </g>
+                </svg>
               </div>
-              <canvas id="metricsCanvas" width="360" height="180" aria-label="Run metrics chart"></canvas>
-            </div>
-          </section>
+
+              <div class="panel chart-panel">
+                <div class="panel-header">
+                  <h2>Run Metrics</h2>
+                  <span>inertia / rows</span>
+                </div>
+                <canvas id="metricsCanvas" width="360" height="180" aria-label="Run metrics chart"></canvas>
+              </div>
+            </section>
+          </div>
         </section>
 
         <section id="datasets" class="table-view">

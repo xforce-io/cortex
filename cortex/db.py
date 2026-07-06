@@ -34,6 +34,29 @@ def migrate(conn: sqlite3.Connection) -> None:
           updated_at TEXT NOT NULL,
           UNIQUE(name, team)
         );
+        CREATE TABLE IF NOT EXISTS projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          owner TEXT NOT NULL,
+          team TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(name, team)
+        );
+        CREATE TABLE IF NOT EXISTS project_dataset_links (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          dataset_id TEXT NOT NULL REFERENCES datasets(id),
+          role TEXT NOT NULL DEFAULT 'train',
+          version_policy TEXT NOT NULL DEFAULT 'latest',
+          pinned_version TEXT,
+          added_by TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          notes TEXT NOT NULL DEFAULT '',
+          UNIQUE(project_id, dataset_id)
+        );
         CREATE TABLE IF NOT EXISTS dataset_versions (
           id TEXT PRIMARY KEY,
           dataset_id TEXT NOT NULL REFERENCES datasets(id),
@@ -158,6 +181,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ensure_column(conn, "datasets", "domain", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "datasets", "source_system", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "training_jobs", "project_id", "TEXT NOT NULL DEFAULT 'proj_default'")
     ensure_column(conn, "training_jobs", "progress_percent", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "training_jobs", "status_message", "TEXT NOT NULL DEFAULT 'Queued'")
     seed_templates(conn)

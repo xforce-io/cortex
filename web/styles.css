@@ -30,6 +30,10 @@ button {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
@@ -87,6 +91,10 @@ button {
 .nav-list {
   display: grid;
   gap: 4px;
+}
+
+.workspace-mode .nav-list {
+  display: none;
 }
 
 .nav-item {
@@ -246,6 +254,64 @@ label span {
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 12px;
+}
+
+.project-landing {
+  display: grid;
+  gap: 14px;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.project-card {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 8px;
+  min-height: 150px;
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  text-align: left;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.project-card:hover,
+.project-card:focus-visible {
+  border-color: var(--accent);
+  outline: 0;
+}
+
+.project-card-title {
+  font-size: 16px;
+  font-weight: 750;
+}
+
+.project-card-description,
+.project-card-meta {
+  color: var(--muted);
+}
+
+.project-card-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.project-card-stats span {
+  background: var(--surface-2);
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: #304044;
+  font-size: 12px;
 }
 
 .empty-state {

@@ -6,7 +6,7 @@ import os
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .app import CortexApp
 
@@ -62,6 +62,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             path = unquote(urlparse(self.path).path)
+            query = parse_qs(urlparse(self.path).query)
             if self._static(path):
                 return
             parts = [p for p in path.split("/") if p]
@@ -69,8 +70,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.healthz())
             elif parts == ["api", "v1", "dashboard"]:
                 self._json(200, self.app.dashboard())
+            elif parts == ["api", "v1", "projects"]:
+                self._json(200, self.app.list_projects())
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 4:
+                self._json(200, self.app.get_project(parts[3]))
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 5 and parts[4] == "dashboard":
+                self._json(200, self.app.dashboard(project_id=parts[3]))
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 5 and parts[4] == "datasets":
+                self._json(200, self.app.list_project_datasets(parts[3]))
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 6 and parts[4:6] == ["training", "jobs"]:
+                self._json(200, self.app.list_training_jobs(project_id=parts[3]))
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 5 and parts[4] == "runs":
+                self._json(200, self.app.list_runs(project_id=parts[3]))
             elif parts == ["api", "v1", "datasets"]:
-                self._json(200, self.app.list_datasets())
+                self._json(
+                    200,
+                    self.app.list_datasets(
+                        tag=query.get("tag", [None])[0],
+                        domain=query.get("domain", [None])[0],
+                        dataset_type=query.get("type", [None])[0],
+                        status=query.get("status", [None])[0],
+                    ),
+                )
             elif parts == ["api", "v1", "training", "templates"]:
                 self._json(200, self.app.list_templates())
             elif parts == ["api", "v1", "training", "jobs"]:
@@ -114,7 +135,31 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(urlparse(self.path).path)
             parts = [p for p in path.split("/") if p]
             body = self._body()
-            if parts == ["api", "v1", "datasets"]:
+            if parts == ["api", "v1", "projects"]:
+                self._json(
+                    201,
+                    self.app.create_project(
+                        body["name"],
+                        body.get("owner", "unknown"),
+                        body.get("team", "unknown"),
+                        body.get("description", ""),
+                        body.get("status", "active"),
+                    ),
+                )
+            elif parts[:3] == ["api", "v1", "projects"] and len(parts) == 5 and parts[4] == "datasets:link":
+                self._json(
+                    201,
+                    self.app.link_project_dataset(
+                        parts[3],
+                        body["datasetId"],
+                        body.get("role", "train"),
+                        body.get("versionPolicy", "latest"),
+                        body.get("pinnedVersion"),
+                        body.get("addedBy", body.get("owner", "unknown")),
+                        body.get("notes", ""),
+                    ),
+                )
+            elif parts == ["api", "v1", "datasets"]:
                 self._json(
                     201,
                     self.app.create_dataset(
@@ -125,14 +170,17 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("description", ""),
                         body.get("tags", []),
                         body.get("visibility", "team"),
+                        body.get("projectId"),
+                        body.get("domain", ""),
+                        body.get("sourceSystem", ""),
                     ),
                 )
             elif parts == ["api", "v1", "demo", "kmeans"]:
-                self._json(201, self.app.create_kmeans_demo())
+                self._json(201, self.app.create_kmeans_demo(body.get("projectId")))
             elif parts == ["api", "v1", "demo", "full-test"]:
-                self._json(201, self.app.create_full_test_demo())
+                self._json(201, self.app.create_full_test_demo(body.get("projectId")))
             elif parts == ["api", "v1", "demo", "slow-training"]:
-                self._json(201, self.app.create_slow_training_demo())
+                self._json(201, self.app.create_slow_training_demo(body.get("projectId")))
             elif parts == ["api", "v1", "evaluations"]:
                 self._json(
                     201,
@@ -168,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("params", {}),
                         body.get("owner", "unknown"),
                         body.get("team", "unknown"),
+                        body.get("projectId"),
                     ),
                 )
             elif parts[:3] == ["api", "v1", "training"] and len(parts) == 6 and parts[3] == "jobs" and parts[5] == "cancel":

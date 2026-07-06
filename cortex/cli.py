@@ -31,6 +31,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cortex")
     sub = parser.add_subparsers(dest="group", required=True)
 
+    project = sub.add_parser("project")
+    project_sub = project.add_subparsers(dest="command", required=True)
+    project_sub.add_parser("list")
+    project_create = project_sub.add_parser("create")
+    project_create.add_argument("--name", required=True)
+    project_create.add_argument("--owner", required=True)
+    project_create.add_argument("--team", required=True)
+    project_create.add_argument("--description", default="")
+    project_datasets = project_sub.add_parser("datasets")
+    project_datasets.add_argument("project_id")
+    project_link = project_sub.add_parser("link-dataset")
+    project_link.add_argument("project_id")
+    project_link.add_argument("dataset_id")
+    project_link.add_argument("--role", default="train")
+    project_link.add_argument("--version-policy", default="latest")
+    project_link.add_argument("--pinned-version")
+    project_link.add_argument("--added-by", default="unknown")
+
     dataset = sub.add_parser("dataset")
     ds_sub = dataset.add_subparsers(dest="command", required=True)
     ds_create = ds_sub.add_parser("create")
@@ -40,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     ds_create.add_argument("--team", required=True)
     ds_create.add_argument("--description", default="")
     ds_create.add_argument("--visibility", default="team")
+    ds_create.add_argument("--project")
+    ds_create.add_argument("--tag", action="append", default=[])
+    ds_create.add_argument("--domain", default="")
+    ds_create.add_argument("--source-system", default="")
 
     ds_sub.add_parser("show").add_argument("dataset_id")
     ds_lineage = ds_sub.add_parser("lineage")
@@ -64,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--experiment", required=True)
     submit.add_argument("--owner", required=True)
     submit.add_argument("--team", required=True)
+    submit.add_argument("--project")
     submit.add_argument("--param", action="append", default=[])
     submit.add_argument("--wait", action="store_true")
     train_sub.add_parser("status").add_argument("job_id")
@@ -104,8 +127,29 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     app = CortexApp.open()
     try:
-        if args.group == "dataset" and args.command == "create":
-            print_json(app.create_dataset(args.name, args.type, args.owner, args.team, args.description, visibility=args.visibility))
+        if args.group == "project" and args.command == "list":
+            print_json(app.list_projects())
+        elif args.group == "project" and args.command == "create":
+            print_json(app.create_project(args.name, args.owner, args.team, args.description))
+        elif args.group == "project" and args.command == "datasets":
+            print_json(app.list_project_datasets(args.project_id))
+        elif args.group == "project" and args.command == "link-dataset":
+            print_json(app.link_project_dataset(args.project_id, args.dataset_id, args.role, args.version_policy, args.pinned_version, args.added_by))
+        elif args.group == "dataset" and args.command == "create":
+            print_json(
+                app.create_dataset(
+                    args.name,
+                    args.type,
+                    args.owner,
+                    args.team,
+                    args.description,
+                    tags=args.tag,
+                    visibility=args.visibility,
+                    project_id=args.project,
+                    domain=args.domain,
+                    source_system=args.source_system,
+                )
+            )
         elif args.group == "dataset" and args.command == "show":
             print_json(app.get_dataset(args.dataset_id))
         elif args.group == "dataset" and args.command == "lineage":
@@ -115,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.group == "train" and args.command == "templates":
             print_json(app.list_templates())
         elif args.group == "train" and args.command == "submit":
-            print_json(app.submit_training_job(args.template, args.dataset, args.experiment, parse_params(args.param), args.owner, args.team, wait=args.wait))
+            print_json(app.submit_training_job(args.template, args.dataset, args.experiment, parse_params(args.param), args.owner, args.team, wait=args.wait, project_id=args.project))
         elif args.group == "train" and args.command == "status":
             print_json(app.get_training_job(args.job_id))
         elif args.group == "train" and args.command == "logs":
