@@ -42,6 +42,9 @@
 
 | 名词 | 解释 |
 | --- | --- |
+| Project | workspace 下的业务问题或交付单元，用于聚合相关 Dataset、Experiment、Job、Run、Model 和 Evaluation。详细设计见 [Project 与 Dataset Catalog 设计](design/1-project-dataset-catalog.md)。 |
+| Dataset Catalog | workspace 级数据资产目录，Dataset 是 catalog 级事实源，Project 通过引用关系使用 DatasetVersion。 |
+| ProjectDatasetLink | Project 与 Dataset 的使用关系，记录 role、versionPolicy、pinnedVersion、addedBy 等元数据。 |
 | Experiment | MLflow 中的实验集合，按业务域/项目组织一组训练 Run。 |
 | Run | 一次训练或评估执行，记录参数、指标、artifact、数据集输入和运行标签。 |
 | Registered Model | MLflow Model Registry 中的业务模型实体，一个模型下可以有多个版本。 |
@@ -421,6 +424,8 @@ Dataset
 
 ### 9.1 信息架构
 
+Project 是 workspace 下的顶层业务入口。控制台第一屏展示 Project 卡片，进入 Project 后再查看当前业务问题相关的数据集、训练、实验、模型和评估。Project 与 Dataset Catalog 的详细设计见：[Project 与 Dataset Catalog 设计](design/1-project-dataset-catalog.md)。
+
 顶层导航 5 个模块，按"资产 + 活动"组织：**数据集、模型**是资产型模块（管的是有版本的东西），**训练、实验、发布**是活动型模块（管的是过程与流程）。这与 Azure ML Studio（Data / Jobs / Models / Endpoints 等约 9 项）、Vertex AI（Datasets / Training / Experiments / Model Registry / Endpoints 等 10+ 项）的组织方式一致；业界主流平台顶层导航普遍在 6~10 项，5 个模块不算多，后续接入目录搜索、监控后还会自然增长。
 
 模块间不靠导航合并来关联，而是靠**详情页交叉链接**串成血缘闭环：
@@ -448,7 +453,8 @@ graph LR
 
 | 页面          | 核心内容与交互                                                                                          |
 | ----------- | ------------------------------------------------------------------------------------------------ |
-| 数据集列表       | 按 type / owner / team / tag / status 筛选；搜索；创建入口                                                  |
+| Project 数据集列表 | 当前 Project 已引用的数据集；按 type / owner / team / tag / status 筛选；搜索；创建入口；可从 Catalog 添加共享 Dataset |
+| Workspace Catalog | workspace 级 Dataset Catalog；按 tag / domain / type / status 搜索；查看共享状态与跨 Project 使用情况 |
 | 数据集详情       | 基本信息、版本列表（版本号、checksum、rowCount、trainable 状态）、schema 展示；LLM 类数据集展示样本预览（instruction/output 抽样若干条） |
 | 版本详情        | schema、split 比例、storageUri、质量报告（Phase 3）、**消费此版本的 Run/模型版本列表**（血缘出边）                             |
 | 版本对比        | 两个版本间 schema diff、行数变化、样本量变化                                                                     |
@@ -575,11 +581,13 @@ graph LR
 ### Phase 1：最小可用（模型生命周期 + 基础数据集）
 
 详细设计见：[Phase 1 详细设计：最小可用机器学习平台](design/phase-1-detailed-design.md)。
+Project 与 Dataset Catalog 设计见：[Project 与 Dataset Catalog 设计](design/1-project-dataset-catalog.md)。
 
 建设内容：
 
+- Project 一期：workspace 顶层 Project 卡片；进入 Project 后复用现有主页面；旧流程自动映射到 `proj_default`
 - MLflow Server 生产化部署（PostgreSQL + MinIO）
-- Dataset Service 一期：tabular / time_series / text_instruction 三类，版本 + checksum + 与 Run 关联，storage 直接用 MinIO 对象 URI。§7.3 中的 `approvalStatus` / `qualityReport` 字段预留但不启用，版本创建后默认 `trainable=true`
+- Dataset Service 一期：tabular / time_series / text_instruction 三类，版本 + checksum + 与 Run 关联，storage 直接用 MinIO 对象 URI；Dataset 作为 Catalog 级事实源，通过 ProjectDatasetLink 被 Project 引用。§7.3 中的 `approvalStatus` / `qualityReport` 字段预留但不启用，版本创建后默认 `trainable=true`
 - Training Service 一期：sklearn 与 PyTorch 两类模板（`sklearn-kmeans` / `sklearn-classifier` / `sklearn-regressor` / `pytorch-basic`），通过 Docker Compose 环境中的本机/容器任务执行器提交。MSTL 等 statsmodels 时序模板不在 Phase 1 内置清单中，随 Phase 2 按需求补充
 - 前端一期（可选交付）：实验、模型注册表、数据集列表、训练任务提交与日志查看
 
