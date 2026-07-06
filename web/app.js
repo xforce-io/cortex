@@ -9,6 +9,7 @@ const state = {
     job: null,
     run: null,
     model: null,
+    result: null,
     evaluation: null,
   },
   details: {},
@@ -32,6 +33,7 @@ const state = {
     jobs: false,
     runs: false,
     models: false,
+    results: false,
     evaluations: false,
   },
   pollingJobs: new Set(),
@@ -167,6 +169,7 @@ function render() {
   $("#metricRuns").textContent = summary.runs;
   $("#metricModels").textContent = summary.models;
   $("#metricTests").textContent = summary.evaluations;
+  $("#metricResults").textContent = summary.experimentResults || 0;
   $("#emptyState").classList.toggle("visible", summary.datasets === 0 && summary.jobs === 0 && summary.models === 0);
 
   $("#datasetCount").textContent = `${datasets.length} records`;
@@ -213,6 +216,17 @@ function render() {
     "No models",
   );
 
+  const results = rankedResults(state.dashboard.experimentResults || []);
+  $("#resultCount").textContent = `${results.length} records`;
+  $("#resultsBody").innerHTML = limitedRows(
+    "results",
+    results,
+    8,
+    (result) =>
+      `<tr ${clickableRow("result", result.id)}><td>${result.rank}</td><td>${escapeHtml(result.methodId)}</td><td>${escapeHtml(result.methodKind || "")}</td><td>${metricValue(result.metrics?.rmse)}</td><td>${metricValue(result.metrics?.mae)}</td><td>${metricValue(result.metrics?.r2)}</td><td>${metricValue(result.metrics?.mape)}</td><td>${metricValue(result.metrics?.cv)}</td></tr>`,
+    "No results",
+  );
+
   const evaluations = state.dashboard.evaluations || [];
   $("#testCount").textContent = `${evaluations.length} records`;
   $("#testsBody").innerHTML = limitedRows(
@@ -257,11 +271,12 @@ function renderProjectCards() {
 }
 
 function ensureSelections() {
-  const { datasets, jobs, runs, models, evaluations = [] } = state.dashboard;
+  const { datasets, jobs, runs, models, evaluations = [], experimentResults = [] } = state.dashboard;
   state.selected.dataset = datasets.some((item) => item.id === state.selected.dataset) ? state.selected.dataset : datasets[0]?.id || null;
   state.selected.job = jobs.some((item) => item.id === state.selected.job) ? state.selected.job : jobs[0]?.id || null;
   state.selected.run = runs.some((item) => item.id === state.selected.run) ? state.selected.run : runs[0]?.id || null;
   state.selected.model = models.some((item) => item.name === state.selected.model) ? state.selected.model : models[0]?.name || null;
+  state.selected.result = experimentResults.some((item) => item.id === state.selected.result) ? state.selected.result : experimentResults[0]?.id || null;
   state.selected.evaluation = evaluations.some((item) => item.id === state.selected.evaluation) ? state.selected.evaluation : evaluations[0]?.id || null;
   state.selectedRun = runs.find((run) => run.id === state.selected.run) || runs[0] || null;
 }
@@ -324,8 +339,22 @@ function findResource(type, id) {
   if (type === "job") return data.jobs.find((item) => item.id === id);
   if (type === "run") return data.runs.find((item) => item.id === id);
   if (type === "model") return data.models.find((item) => item.name === id);
+  if (type === "result") return (data.experimentResults || []).find((item) => item.id === id);
   if (type === "evaluation") return (data.evaluations || []).find((item) => item.id === id);
   return null;
+}
+
+function rankedResults(results) {
+  return [...results]
+    .sort((left, right) => Number(left.metrics?.rmse ?? Number.POSITIVE_INFINITY) - Number(right.metrics?.rmse ?? Number.POSITIVE_INFINITY))
+    .map((result, index) => ({ ...result, rank: index + 1 }));
+}
+
+function metricValue(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return escapeHtml(value);
+  return escapeHtml(Number(numeric.toFixed(6)));
 }
 
 function detailKey(type, id) {
@@ -535,6 +564,7 @@ function renderAllDetails() {
   renderJobDetail();
   renderRunDetail();
   renderModelDetail();
+  renderResultDetail();
   renderEvaluationDetail();
 }
 
@@ -664,6 +694,29 @@ function renderModelDetail() {
       ["Created", escapeHtml(model.createdAt)],
     ]) +
       `<h4>Versions</h4>${model.versions.length ? detailList(model.versions.map((version) => [`Version ${version.version}`, `run ${escapeHtml(shortId(version.runId))} · ${escapeHtml(version.artifactPath)} · ${escapeHtml(version.description || "no description")}`])) : `<p class="muted">No versions</p>`}`,
+  );
+}
+
+function renderResultDetail() {
+  const result = findResource("result", state.selected.result);
+  if (!result) {
+    setDetail("#resultDetail", "Result detail", "Select a result", "");
+    return;
+  }
+  setDetail(
+    "#resultDetail",
+    result.methodId,
+    result.experimentName,
+    detailList([
+      ["ID", `<span class="mono">${escapeHtml(result.id)}</span>`],
+      ["Experiment", escapeHtml(result.experimentName)],
+      ["Method", escapeHtml(result.methodId)],
+      ["Kind", escapeHtml(result.methodKind || "empty")],
+      ["Dataset", escapeHtml(result.datasetRef || "empty")],
+      ["Artifact", escapeHtml(result.artifactUri || "empty")],
+      ["Created By", escapeHtml(result.createdBy)],
+      ["Created", escapeHtml(result.createdAt)],
+    ]) + `<h4>Metrics</h4>${jsonBlock(result.metrics)}`,
   );
 }
 
@@ -980,6 +1033,7 @@ function applyView(view) {
     training: "Training Jobs",
     runs: "Experiments",
     models: "Models",
+    results: "Results",
     tests: "Evaluations",
   };
   const project = state.dashboard?.project;
@@ -989,6 +1043,7 @@ function applyView(view) {
     training: ["job", state.selected.job],
     runs: ["run", state.selected.run],
     models: ["model", state.selected.model],
+    results: ["result", state.selected.result],
     tests: ["evaluation", state.selected.evaluation],
   };
   const selection = selectedByView[view];
