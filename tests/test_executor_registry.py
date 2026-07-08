@@ -379,3 +379,61 @@ executors:
                 self.assertIn("TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:bad-entrypoint-executor", job["errorMessage"])
             finally:
                 app.conn.close()
+
+    def test_external_executor_id_conflict_does_not_overwrite_builtin_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "conflict-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: conflict-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: sklearn-kmeans
+    name: External KMeans Override
+    model_type: python
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema:
+      type: object
+      properties: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+class Executor:
+    def run(self, context):
+        raise AssertionError("external conflict should not run")
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "conflict"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                templates = {template["id"]: template for template in app.list_templates()}
+
+                self.assertEqual(templates["sklearn-kmeans"]["name"], "sklearn KMeans")
+                self.assertEqual(templates["sklearn-kmeans"]["modelType"], "sklearn")
+                self.assertEqual(templates["sklearn-kmeans"]["executorStatus"], "available")
+            finally:
+                app.conn.close()

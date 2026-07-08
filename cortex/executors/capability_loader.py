@@ -31,12 +31,16 @@ def load_capability_repositories(paths: list[Path], conn, registry) -> dict[str,
     status_reasons: dict[str, str] = {}
     for repo_path in paths:
         for result in load_capability_repository(repo_path):
-            sync_external_template(conn, result.spec)
+            if registry.get(result.spec.template_id):
+                status_reasons[result.spec.template_id] = f"EXECUTOR_ALREADY_REGISTERED:{result.spec.template_id}"
+                continue
             if result.executor is None:
+                sync_external_template(conn, result.spec)
                 status_reasons[result.spec.template_id] = result.reason
                 continue
             try:
                 registry.register(result.executor)
+                sync_external_template(conn, result.spec)
                 status_reasons[result.spec.template_id] = ""
             except ValueError as exc:
                 status_reasons[result.spec.template_id] = str(exc)
