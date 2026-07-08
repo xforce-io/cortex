@@ -124,6 +124,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.list_evaluations())
             elif parts == ["api", "v1", "experiment-results"]:
                 self._json(200, self.app.list_experiment_results())
+            elif parts == ["api", "v1", "experiment-results:compare"]:
+                self._json(
+                    200,
+                    self.app.compare_experiment_results(
+                        query.get("experimentName", [""])[0],
+                        query.get("datasetRef", [""])[0],
+                        query.get("methodKind", [""])[0],
+                        query.get("sortBy", ["rmse"])[0],
+                        query.get("sortOrder", ["asc"])[0],
+                    ),
+                )
             elif parts[:3] == ["api", "v1", "evaluations"] and len(parts) == 4:
                 self._json(200, self.app.get_evaluation(parts[3]))
             elif parts[:3] == ["api", "v1", "experiment-results"] and len(parts) == 4:
