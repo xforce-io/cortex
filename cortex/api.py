@@ -244,6 +244,14 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("datasetRef", ""),
                     ),
                 )
+            elif parts == ["api", "v1", "experiment-results:import-manifest"]:
+                self._json(
+                    201,
+                    self.app.import_prediction_results_manifest(
+                        body["manifest"],
+                        body.get("createdBy", body.get("owner", "unknown")),
+                    ),
+                )
             elif parts[:3] == ["api", "v1", "datasets"] and len(parts) == 5 and parts[4] == "versions":
                 self._json(
                     201,
