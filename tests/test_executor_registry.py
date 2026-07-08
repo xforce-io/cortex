@@ -3,6 +3,13 @@ import unittest
 from pathlib import Path
 
 from cortex.app import CortexApp
+from cortex.executors.builtins import (
+    PytorchSequenceForecastExecutor,
+    SklearnKMeansExecutor,
+    SklearnRegressorExecutor,
+    StatsmodelsMstlExecutor,
+    builtin_executor_registry,
+)
 from cortex.executors.base import ExecutionResult
 from cortex.executors.registry import ExecutorRegistry
 
@@ -48,3 +55,11 @@ class ExecutorRegistryTest(unittest.TestCase):
                 self.assertEqual(templates["sklearn-kmeans"]["executorStatus"], "not_implemented")
             finally:
                 app.conn.close()
+
+    def test_builtin_registry_uses_concrete_executors(self):
+        registry = builtin_executor_registry()
+
+        self.assertIsInstance(registry.get("sklearn-kmeans"), SklearnKMeansExecutor)
+        self.assertIsInstance(registry.get("sklearn-regressor"), SklearnRegressorExecutor)
+        self.assertIsInstance(registry.get("statsmodels-mstl"), StatsmodelsMstlExecutor)
+        self.assertIsInstance(registry.get("pytorch-sequence-forecast"), PytorchSequenceForecastExecutor)
