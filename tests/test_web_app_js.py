@@ -235,6 +235,7 @@ state.details["dataset:ds_customer_features"] = {
     "v1": {
       rows: [{ customer_id: "c_001" }, { customer_id: "c_002" }],
       schema: { columns: [{ name: "customer_id", type: "string" }] },
+      storageUri: "s3://datasets/customer-features/v1/data.csv",
       profile: { rows: 2, columns: 1 },
       truncated: false,
     },
@@ -243,15 +244,82 @@ state.details["dataset:ds_customer_features"] = {
 
 renderDatasetDetail();
 const html = elementFor("#datasetDetail").innerHTML;
+assert.match(html, /dataset-asset-summary/);
+assert.match(html, /data-use-dataset-version="ds_customer_features@v1"/);
+assert.ok(html.indexOf("dataset-asset-summary") < html.indexOf("data-dataset-metadata-form"));
+assert.match(html, /Reusable customer features/);
+assert.match(html, /ds_customer_features/);
+assert.match(html, /最新 v1/);
+assert.match(html, /verified/);
+assert.match(html, /trainable/);
+assert.match(html, /approved/);
 assert.match(html, /DatasetVersion/);
 assert.match(html, /data-preview-dataset-version="v1"/);
+assert.match(html, /收起预览/);
+assert.match(html, /preview-panel framed-panel/);
+assert.match(html, /data-close-dataset-preview/);
 assert.match(html, /data-use-dataset-version="ds_customer_features@v1"/);
 assert.match(html, /data-unlink-project-dataset="ds_customer_features"/);
-assert.match(html, /归档全局数据集/);
-assert.match(html, /归档会影响所有项目/);
+assert.doesNotMatch(html, /data-archive-dataset/);
+assert.doesNotMatch(html, /data-restore-dataset/);
 assert.doesNotMatch(html, /Delete dataset/);
+assert.match(html, /DatasetVersion v1 · s3:\/\/datasets\/customer-features\/v1\/data.csv · 行数 2 · 1 columns/);
+assert.match(html, /customer_id/);
+assert.match(html, /string/);
 assert.match(html, /customer_id/);
 assert.match(html, /c_001/);
+"""
+        )
+
+    def test_project_archived_dataset_is_read_only_not_restorable(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = "proj_default";
+state.dashboard = {
+  project: { id: "proj_default", name: "Default" },
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  datasets: [
+    {
+      id: "ds_old_features",
+      name: "old-features",
+      description: "Archived but historically linked",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      domain: "crm",
+      sourceSystem: "warehouse",
+      visibility: "team",
+      tags: ["old"],
+      status: "archived",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+      projectLink: { id: "pdl_1", role: "train", versionPolicy: "latest", pinnedVersion: null },
+    },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.selected.dataset = "ds_old_features";
+state.details["dataset:ds_old_features"] = {
+  versions: [{ id: "dv_old_v1", datasetId: "ds_old_features", version: "v1", format: "csv", storageUri: "s3://datasets/old/v1/data.csv", rowCount: 2, checksumStatus: "verified", trainable: true, approvalStatus: "approved" }],
+  lineage: [],
+};
+
+renderDatasetDetail();
+const html = elementFor("#datasetDetail").innerHTML;
+assert.match(html, /archived/);
+assert.match(html, /仅用于历史查看/);
+assert.match(html, /data-preview-dataset-version="v1"/);
+assert.match(html, /data-unlink-project-dataset="ds_old_features"/);
+assert.doesNotMatch(html, /data-use-dataset-version/);
+assert.doesNotMatch(html, /data-archive-dataset/);
+assert.doesNotMatch(html, /data-restore-dataset/);
+assert.doesNotMatch(html, /恢复数据集/);
 """
         )
 
@@ -301,9 +369,119 @@ assert.match(detailHtml, /catalog-features/);
 assert.match(detailHtml, /Global catalog dataset/);
 assert.match(detailHtml, /DatasetVersion v1/);
 assert.match(detailHtml, /data-preview-dataset-version="v1"/);
+assert.doesNotMatch(detailHtml, /data-use-dataset-version="ds_catalog_features@v1"/);
 assert.match(detailHtml, /归档全局数据集/);
 assert.match(detailHtml, /全局资产级逻辑删除/);
 assert.doesNotMatch(detailHtml, /data-unlink-project-dataset/);
+"""
+        )
+
+    def test_workspace_catalog_can_switch_to_archived_datasets(self):
+        self.run_app_script(
+            r"""
+const requestedPaths = [];
+global.fetch = async (url) => ({
+  ok: true,
+  json: async () => {
+    requestedPaths.push(String(url));
+    return [
+      {
+        id: "ds_archived_features",
+        name: "archived-features",
+        description: "Old shared features",
+        type: "tabular",
+        versionCount: 1,
+        latestVersion: "v1",
+        owner: "alice",
+        team: "ml",
+        domain: "",
+        sourceSystem: "",
+        visibility: "team",
+        tags: [],
+        status: "archived",
+        createdAt: "2026-07-06T00:00:00Z",
+        updatedAt: "2026-07-06T00:00:00Z",
+      },
+    ];
+  },
+  text: async () => "",
+});
+state.currentProjectId = null;
+state.dashboard = {
+  summary: { datasets: 0, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  projects: [],
+  datasets: [],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+
+await setCatalogStatus("archived");
+
+assert.ok(requestedPaths.some((path) => /\/api\/v1\/datasets\?status=archived$/.test(path)));
+assert.strictEqual(state.catalog.status, "archived");
+assert.strictEqual(state.selected.dataset, "ds_archived_features");
+assert.match(elementFor("#catalogDatasetsBody").innerHTML, /archived-features/);
+assert.match(elementFor("#catalogDatasetDetail").innerHTML, /恢复数据集/);
+assert.doesNotMatch(elementFor("#catalogDatasetDetail").innerHTML, /data-use-dataset-version/);
+"""
+        )
+
+    def test_preview_scroll_target_uses_active_dataset_surface(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = null;
+assert.strictEqual(activeDatasetDetailSelector(), "#catalogDatasetDetail");
+state.currentProjectId = "proj_default";
+assert.strictEqual(activeDatasetDetailSelector(), "#datasetDetail");
+"""
+        )
+
+    def test_preview_button_toggles_selected_preview(self):
+        self.run_app_script(
+            r"""
+state.currentProjectId = "proj_default";
+state.dashboard = {
+  project: { id: "proj_default", name: "Default" },
+  summary: { datasets: 1, jobs: 0, runs: 0, models: 0, evaluations: 0, experimentResults: 0 },
+  datasets: [
+    {
+      id: "ds_toggle",
+      name: "toggle",
+      description: "Toggle preview",
+      type: "tabular",
+      versionCount: 1,
+      latestVersion: "v1",
+      owner: "alice",
+      team: "ml",
+      visibility: "team",
+      tags: [],
+      status: "active",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
+      projectLink: { id: "pdl_1", role: "train", versionPolicy: "latest", pinnedVersion: null },
+    },
+  ],
+  jobs: [],
+  runs: [],
+  models: [],
+  evaluations: [],
+  experimentResults: [],
+};
+state.selected.dataset = "ds_toggle";
+state.details["dataset:ds_toggle"] = {
+  versions: [{ id: "dv_toggle_v1", datasetId: "ds_toggle", version: "v1", format: "csv", storageUri: "s3://datasets/toggle/v1/data.csv", rowCount: 1, checksumStatus: "verified", trainable: true, approvalStatus: "approved" }],
+  lineage: [],
+  selectedPreview: "v1",
+  preview: { "v1": { version: "v1", rows: [{ x: 1 }], schema: { columns: [{ name: "x", type: "float" }] }, profile: { rows: 1, columns: 1 }, storageUri: "s3://datasets/toggle/v1/data.csv" } },
+};
+
+await previewDatasetVersion("v1");
+
+assert.strictEqual(state.details["dataset:ds_toggle"].selectedPreview, "");
+assert.doesNotMatch(elementFor("#datasetDetail").innerHTML, /preview-panel/);
 """
         )
 
