@@ -38,6 +38,12 @@ const state = {
     results: false,
     evaluations: false,
   },
+  catalog: {
+    status: "active",
+    archivedDatasets: [],
+    loading: false,
+    error: "",
+  },
   pollingJobs: new Set(),
 };
 
@@ -50,6 +56,7 @@ const I18N = {
   "zh-CN": {
     "action.cancel": "取消",
     "action.archiveDataset": "归档全局数据集",
+    "action.closePreview": "关闭预览",
     "action.createExample": "创建示例工作区",
     "action.creatingExample": "正在创建示例工作区",
     "action.editMetadata": "保存元数据",
@@ -63,6 +70,7 @@ const I18N = {
     "action.registerModelVersion": "注册模型版本",
     "action.submitJob": "提交任务",
     "action.useForTraining": "用于训练",
+    "action.collapsePreview": "收起预览",
     "action.viewTrainingResults": "查看训练结果",
     "aria.lineage": "数据集到任务、运行、模型的血缘",
     "aria.primary": "主导航",
@@ -72,6 +80,7 @@ const I18N = {
     "brand.subtitle": "机器学习平台",
     "common.empty": "空",
     "common.loadingLineage": "正在加载血缘",
+    "common.loadingDatasets": "正在加载数据集",
     "common.loadingLogs": "正在加载日志",
     "common.loadingVersions": "正在加载版本",
     "common.noArtifacts": "没有制品",
@@ -93,6 +102,8 @@ const I18N = {
     "empty.title": "还没有机器学习资产",
     "error.apiReach": "无法访问 Cortex API：{target}。请打开 http://127.0.0.1:8768/ 或启动本地 API 服务。",
     "field.artifact": "制品",
+    "field.active": "活跃",
+    "field.archived": "已归档",
     "field.challenger": "Challenger",
     "field.champion": "Champion",
     "field.created": "创建时间",
@@ -146,7 +157,7 @@ const I18N = {
     "form.registeredFrom": "注册自 {id}",
     "form.submittingJob": "正在提交任务",
     "hint.archiveDataset": "归档是全局资产级逻辑删除：默认列表隐藏并禁止新训练，不删除数据集版本、项目引用或历史血缘。",
-    "hint.archiveProjectDataset": "归档会影响所有项目；如果只是不想在当前项目使用，请选择“从项目移除”。",
+    "hint.projectArchivedDataset": "此数据集已归档，仅用于历史查看；如不再需要可从项目移除。",
     "health.checking": "检查中",
     "health.healthy": "健康",
     "health.unavailable": "不可用",
@@ -205,6 +216,7 @@ const I18N = {
   en: {
     "action.cancel": "Cancel",
     "action.archiveDataset": "Archive global dataset",
+    "action.closePreview": "Close preview",
     "action.createExample": "Create example workspace",
     "action.creatingExample": "Creating example workspace",
     "action.editMetadata": "Save metadata",
@@ -218,6 +230,7 @@ const I18N = {
     "action.registerModelVersion": "Register model version",
     "action.submitJob": "Submit job",
     "action.useForTraining": "Use for training",
+    "action.collapsePreview": "Collapse preview",
     "action.viewTrainingResults": "View training results",
     "aria.lineage": "Dataset to job to run to model lineage",
     "aria.primary": "Primary",
@@ -227,6 +240,7 @@ const I18N = {
     "brand.subtitle": "ML Platform",
     "common.empty": "empty",
     "common.loadingLineage": "Loading lineage",
+    "common.loadingDatasets": "Loading datasets",
     "common.loadingLogs": "Loading logs",
     "common.loadingVersions": "Loading versions",
     "common.noArtifacts": "No artifacts",
@@ -248,6 +262,8 @@ const I18N = {
     "empty.title": "No ML assets yet",
     "error.apiReach": "Cannot reach Cortex API at {target}. Open http://127.0.0.1:8768/ or start the local API service.",
     "field.artifact": "Artifact",
+    "field.active": "Active",
+    "field.archived": "Archived",
     "field.challenger": "Challenger",
     "field.champion": "Champion",
     "field.created": "Created",
@@ -301,7 +317,7 @@ const I18N = {
     "form.registeredFrom": "Registered from {id}",
     "form.submittingJob": "Submitting job",
     "hint.archiveDataset": "Archive is a global soft-delete action: it hides the dataset from default lists and blocks new training without deleting dataset versions, project links, or historical lineage.",
-    "hint.archiveProjectDataset": "Archiving affects every project; use Remove from project when you only want to unlink it here.",
+    "hint.projectArchivedDataset": "This dataset is archived and available here for historical review only. Remove it from the project if it is no longer needed.",
     "health.checking": "Checking",
     "health.healthy": "Healthy",
     "health.unavailable": "Unavailable",
@@ -627,10 +643,19 @@ function renderProjectCards() {
         })
         .join("")
     : `<p class="muted">${t("common.noProjects")}</p>`;
-  const datasets = state.dashboard?.datasets || [];
+  const datasets = catalogDatasets();
   const catalogCount = $("#catalogDatasetCount");
   const catalogBody = $("#catalogDatasetsBody");
-  if (catalogCount) catalogCount.textContent = t("common.records", { count: datasets.length });
+  document.querySelectorAll("[data-catalog-status]").forEach((button) => {
+    const active = button.dataset.catalogStatus === state.catalog.status;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (catalogCount) {
+    catalogCount.textContent = state.catalog.loading
+      ? t("common.loadingDatasets")
+      : state.catalog.error || t("common.records", { count: datasets.length });
+  }
   if (catalogBody) {
     catalogBody.innerHTML = limitedRows(
       "datasets",
@@ -644,9 +669,36 @@ function renderProjectCards() {
   renderCatalogDatasetDetail();
 }
 
+function catalogDatasets() {
+  if (state.currentProjectId) return state.dashboard?.datasets || [];
+  return state.catalog.status === "archived" ? state.catalog.archivedDatasets : state.dashboard?.datasets || [];
+}
+
+async function setCatalogStatus(status) {
+  if (!["active", "archived"].includes(status)) return;
+  state.catalog.status = status;
+  state.catalog.error = "";
+  state.selected.dataset = null;
+  if (status === "archived" && !state.catalog.archivedDatasets.length) {
+    state.catalog.loading = true;
+    renderProjectCards();
+    try {
+      state.catalog.archivedDatasets = await api("/api/v1/datasets?status=archived");
+    } catch (error) {
+      state.catalog.error = error.message;
+    } finally {
+      state.catalog.loading = false;
+    }
+  }
+  const datasets = catalogDatasets();
+  state.selected.dataset = datasets[0]?.id || null;
+  renderProjectCards();
+}
+
 function ensureSelections() {
   const { datasets, jobs, runs, models, evaluations = [], experimentResults = [] } = state.dashboard;
-  state.selected.dataset = datasets.some((item) => item.id === state.selected.dataset) ? state.selected.dataset : datasets[0]?.id || null;
+  const selectableDatasets = state.currentProjectId ? datasets : catalogDatasets();
+  state.selected.dataset = selectableDatasets.some((item) => item.id === state.selected.dataset) ? state.selected.dataset : selectableDatasets[0]?.id || null;
   state.selected.job = jobs.some((item) => item.id === state.selected.job) ? state.selected.job : jobs[0]?.id || null;
   state.selected.run = runs.some((item) => item.id === state.selected.run) ? state.selected.run : runs[0]?.id || null;
   state.selected.model = models.some((item) => item.name === state.selected.model) ? state.selected.model : models[0]?.name || null;
@@ -709,7 +761,7 @@ function renderChart(runs) {
 function findResource(type, id) {
   const data = state.dashboard;
   if (!data) return null;
-  if (type === "dataset") return data.datasets.find((item) => item.id === id);
+  if (type === "dataset") return (state.currentProjectId ? data.datasets : catalogDatasets()).find((item) => item.id === id);
   if (type === "job") return data.jobs.find((item) => item.id === id);
   if (type === "run") return data.runs.find((item) => item.id === id);
   if (type === "model") return data.models.find((item) => item.name === id);
@@ -799,26 +851,124 @@ function renderCollection(items, emptyLabel = t("common.empty")) {
   return `<ul class="detail-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
-function renderPreviewTable(preview) {
+function findLatestDatasetVersion(dataset, versions) {
+  if (!versions?.length) return null;
+  return versions.find((version) => version.version === dataset.latestVersion) || versions[0];
+}
+
+function datasetVersionRef(dataset, version) {
+  return version ? `${dataset.id}@${version.version}` : "";
+}
+
+function columnCountFor(schema, profile, rows) {
+  return profile?.columns ?? schema?.columns?.length ?? Object.keys(rows?.[0] || {}).length;
+}
+
+function isNumericPreviewValue(value) {
+  return typeof value === "number" || (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value)));
+}
+
+function datasetVersionStatusChips(version) {
+  if (!version) return "";
+  return [
+    version.checksumStatus,
+    version.trainable ? "trainable" : "disabled",
+    version.approvalStatus,
+  ]
+    .filter(Boolean)
+    .map((status) => pill(status))
+    .join(" ");
+}
+
+function previewButtonLabel(version, selectedPreview) {
+  return version && version === selectedPreview ? t("action.collapsePreview") : t("action.preview");
+}
+
+function renderDatasetAssetSummary(dataset, versions, selectedPreview = "") {
+  const latest = findLatestDatasetVersion(dataset, versions);
+  const latestSchema = latest?.schema || {};
+  const latestRows = latest?.rowCount ?? t("common.unknown");
+  const latestColumns = columnCountFor(latestSchema, latest?.profile, []);
+  const canUseLatest = state.currentProjectId && latest && latest.trainable !== false && dataset.status !== "archived";
+  const archiveAction = state.currentProjectId
+    ? ""
+    : dataset.status === "archived"
+      ? `<button class="secondary-button" data-restore-dataset="${escapeHtml(dataset.id)}">${t("action.restoreDataset")}</button>`
+      : `<button class="secondary-button danger-button" data-archive-dataset="${escapeHtml(dataset.id)}">${t("action.archiveDataset")}</button>`;
+  const unlinkAction = state.currentProjectId && dataset.projectLink
+    ? `<button class="secondary-button" data-unlink-project-dataset="${escapeHtml(dataset.id)}">${t("action.removeFromProject")}</button>`
+    : "";
+  const primaryAction = canUseLatest
+    ? `<button class="primary-button" data-use-dataset-version="${escapeHtml(datasetVersionRef(dataset, latest))}">${t("action.useForTraining")}</button>`
+    : "";
+  const previewAction = latest
+    ? `<button class="secondary-button" data-preview-dataset-version="${escapeHtml(latest.version)}">${previewButtonLabel(latest.version, selectedPreview)}</button>`
+    : "";
+  const versionChips = latest
+    ? `${pill(`${t("field.latest")} ${latest.version}`)} ${datasetVersionStatusChips(latest)}`
+    : "";
+  return `
+    <section class="dataset-asset-summary">
+      <div class="dataset-summary-main">
+        <p class="mono dataset-summary-id">${escapeHtml(dataset.id)}</p>
+        <p>${escapeHtml(dataset.description || t("common.noDescription"))}</p>
+        <div class="summary-chip-row">
+          ${pill(dataset.status)}
+          ${pill(dataset.type)}
+          ${pill(dataset.visibility)}
+          ${versionChips}
+        </div>
+      </div>
+      <dl class="summary-metrics">
+        <div><dt>${t("field.owner")}</dt><dd>${escapeHtml(dataset.owner)}</dd></div>
+        <div><dt>${t("field.team")}</dt><dd>${escapeHtml(dataset.team)}</dd></div>
+        <div><dt>${t("field.updated")}</dt><dd>${escapeHtml(dataset.updatedAt)}</dd></div>
+        <div><dt>${t("field.versions")}</dt><dd>${escapeHtml(dataset.versionCount || versions.length || 0)}</dd></div>
+        <div><dt>${t("field.rows")}</dt><dd>${escapeHtml(latestRows)}</dd></div>
+        <div><dt>Columns</dt><dd>${escapeHtml(latestColumns || t("common.unknown"))}</dd></div>
+      </dl>
+      <div class="detail-actions dataset-summary-actions">${primaryAction}${previewAction}${archiveAction}${unlinkAction}</div>
+    </section>
+  `;
+}
+
+function renderPreviewTable(preview, selectedVersion = "") {
   if (!preview) return "";
-  const columns = preview.schema?.columns?.map((column) => column.name) || Object.keys(preview.rows?.[0] || {});
+  const schema = preview.schema || {};
+  const columnDefs = schema.columns || Object.keys(preview.rows?.[0] || {}).map((name) => ({ name, type: "" }));
+  const columns = columnDefs.map((column) => column.name);
   const rows = preview.rows || [];
   const table = rows.length
     ? `
       <div class="table-wrap compact-table">
         <table>
-          <thead><tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
-          <tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(row[column] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody>
+          <thead>
+            <tr>
+              ${columnDefs.map((column) => `
+                <th>
+                  <span class="column-name">${escapeHtml(column.name)}</span>
+                  ${column.type ? `<span class="column-type">${escapeHtml(column.type)}</span>` : ""}
+                </th>
+              `).join("")}
+            </tr>
+          </thead>
+          <tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td class="${isNumericPreviewValue(row[column]) ? "numeric-cell" : ""}">${escapeHtml(row[column] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody>
         </table>
       </div>
     `
     : `<p class="muted">${t("common.empty")}</p>`;
   const profile = preview.profile || {};
+  const version = preview.version || selectedVersion || "";
+  const rowCount = profile.rows ?? rows.length;
+  const columnCount = columnCountFor(schema, profile, rows);
   return `
-    <section class="preview-panel">
-      <h4>${t("section.preview")} · DatasetVersion ${escapeHtml(preview.version || "")}</h4>
-      <p class="muted">${escapeHtml(preview.storageUri || "")} · ${t("field.rows")} ${escapeHtml(profile.rows ?? rows.length)}${preview.truncated ? " · truncated" : ""}</p>
-      ${table}
+    <section class="preview-panel framed-panel">
+      <div class="preview-header">
+        <h4>${t("section.preview")} · DatasetVersion ${escapeHtml(version)}</h4>
+        <button class="icon-button preview-close-button" type="button" data-close-dataset-preview="${escapeHtml(version)}" aria-label="${escapeHtml(t("action.closePreview"))}" title="${escapeHtml(t("action.closePreview"))}">×</button>
+      </div>
+      <p class="muted preview-context">DatasetVersion ${escapeHtml(version)} · ${escapeHtml(preview.storageUri || "")} · ${t("field.rows")} ${escapeHtml(rowCount)} · ${escapeHtml(columnCount)} columns${preview.truncated ? " · truncated" : ""}</p>
+      <div class="preview-table-scroll">${table}</div>
     </section>
   `;
 }
@@ -1007,6 +1157,14 @@ function setDetail(containerId, title, subtitle, body) {
   `;
 }
 
+function activeDatasetDetailSelector() {
+  return state.currentProjectId ? "#datasetDetail" : "#catalogDatasetDetail";
+}
+
+function scrollActiveDatasetPreviewIntoView() {
+  document.querySelector(`${activeDatasetDetailSelector()} .preview-panel`)?.scrollIntoView?.({ block: "start" });
+}
+
 function renderAllDetails() {
   renderCatalogDatasetDetail();
   renderDatasetDetail();
@@ -1021,16 +1179,19 @@ function datasetDetailBody(dataset) {
   const extra = state.details[detailKey("dataset", dataset.id)];
   const versions = extra?.versions || [];
   const lineage = extra?.lineage || [];
-  const preview = extra?.selectedPreview ? extra.preview?.[extra.selectedPreview] : null;
-  const archiveAction = dataset.status === "archived"
-    ? `<button class="secondary-button" data-restore-dataset="${escapeHtml(dataset.id)}">${t("action.restoreDataset")}</button>`
-    : `<button class="secondary-button danger-button" data-archive-dataset="${escapeHtml(dataset.id)}">${t("action.archiveDataset")}</button>`;
-  const unlinkAction = state.currentProjectId && dataset.projectLink
-    ? `<button class="secondary-button" data-unlink-project-dataset="${escapeHtml(dataset.id)}">${t("action.removeFromProject")}</button>`
-    : "";
-  const archiveHint = dataset.status === "archived"
-    ? ""
-    : `<p class="scope-hint">${t(dataset.projectLink ? "hint.archiveProjectDataset" : "hint.archiveDataset")}</p>`;
+  const selectedPreview = extra?.selectedPreview || "";
+  const selectedPreviewVersion = versions.find((version) => version.version === selectedPreview);
+  const preview = selectedPreview ? {
+    ...(extra.preview?.[selectedPreview] || {}),
+    version: selectedPreview,
+    storageUri: extra.preview?.[selectedPreview]?.storageUri || selectedPreviewVersion?.storageUri || "",
+    schema: extra.preview?.[selectedPreview]?.schema || selectedPreviewVersion?.schema || {},
+  } : null;
+  const archiveHint = state.currentProjectId && dataset.status === "archived"
+    ? `<p class="scope-hint">${t("hint.projectArchivedDataset")}</p>`
+    : !state.currentProjectId && dataset.status !== "archived"
+      ? `<p class="scope-hint">${t("hint.archiveDataset")}</p>`
+      : "";
   const metadataForm = `
     <section class="inline-form compact-form">
       <form data-dataset-metadata-form="${escapeHtml(dataset.id)}">
@@ -1064,21 +1225,27 @@ function datasetDetailBody(dataset) {
           <tbody>
             ${versions
               .map(
-                (version) => `
-                  <tr>
+                (version) => {
+                  const trainingAction = state.currentProjectId && dataset.status !== "archived" && version.trainable !== false
+                    ? `<button class="link-button" data-use-dataset-version="${escapeHtml(`${dataset.id}@${version.version}`)}">${t("action.useForTraining")}</button>`
+                    : "";
+                  const isPreviewed = version.version === selectedPreview;
+                  return `
+                  <tr class="${isPreviewed ? "preview-selected-row" : ""}">
                     <td><span class="mono">DatasetVersion ${escapeHtml(version.version)}</span></td>
                     <td>${escapeHtml(version.format)}</td>
                     <td>${escapeHtml(version.rowCount ?? t("common.unknown"))}</td>
                     <td>${escapeHtml(version.checksumStatus)} · ${escapeHtml(shortId(version.checksum || ""))}</td>
-                    <td>${version.trainable ? "trainable" : "disabled"} · ${escapeHtml(version.approvalStatus || "")}</td>
+                    <td><div class="summary-chip-row">${datasetVersionStatusChips(version)}</div></td>
                     <td>
                       <div class="inline-actions horizontal-actions">
-                        <button class="link-button" data-preview-dataset-version="${escapeHtml(version.version)}">${t("action.preview")}</button>
-                        <button class="link-button" data-use-dataset-version="${escapeHtml(`${dataset.id}@${version.version}`)}">${t("action.useForTraining")}</button>
+                        <button class="link-button" data-preview-dataset-version="${escapeHtml(version.version)}">${previewButtonLabel(version.version, selectedPreview)}</button>
+                        ${trainingAction}
                       </div>
                     </td>
                   </tr>
-                `,
+                `;
+                },
               )
               .join("")}
           </tbody>
@@ -1093,7 +1260,8 @@ function datasetDetailBody(dataset) {
         ["Pinned version", escapeHtml(dataset.projectLink.pinnedVersion || t("common.empty"))],
       ])
     : `<p class="muted">${state.currentProjectId ? t("common.empty") : "Workspace catalog"}</p>`;
-  return `<div class="detail-actions">${archiveAction}${unlinkAction}</div>${archiveHint}` +
+  return renderDatasetAssetSummary(dataset, versions, selectedPreview) +
+      archiveHint +
       `<h4>${t("section.metadata")}</h4>` +
       metadataForm +
       detailList([
@@ -1106,7 +1274,7 @@ function datasetDetailBody(dataset) {
         [t("field.updated"), escapeHtml(dataset.updatedAt)],
       ]) +
       `<h4>${t("section.versions")}</h4>${versionTable}` +
-      renderPreviewTable(preview) +
+      renderPreviewTable(preview, selectedPreview) +
       `<h4>${t("section.projectLink")}</h4>${projectLink}` +
       `<h4>${t("section.lineage")}</h4>${lineage.length ? detailList(lineage.map((item) => [shortId(item.mlflowRunId), `${escapeHtml(item.jobStatus)} · ${escapeHtml(item.registeredModelName || t("common.noModel"))}${item.modelVersion ? `:${escapeHtml(item.modelVersion)}` : ""}`])) : `<p class="muted">${extra ? t("common.noDownstreamRuns") : t("common.loadingLineage")}</p>`}`;
 }
@@ -1114,6 +1282,10 @@ function datasetDetailBody(dataset) {
 function renderCatalogDatasetDetail() {
   const container = $("#catalogDatasetDetail");
   if (!container) return;
+  if (state.currentProjectId) {
+    container.innerHTML = "";
+    return;
+  }
   const dataset = findResource("dataset", state.selected.dataset);
   if (!dataset) {
     setDetail("#catalogDatasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
@@ -1123,6 +1295,11 @@ function renderCatalogDatasetDetail() {
 }
 
 function renderDatasetDetail() {
+  if (!state.currentProjectId) {
+    const container = $("#datasetDetail");
+    if (container) container.innerHTML = "";
+    return;
+  }
   const dataset = findResource("dataset", state.selected.dataset);
   if (!dataset) {
     setDetail("#datasetDetail", t("page.datasetDetail"), t("select.dataset"), "");
@@ -1574,6 +1751,15 @@ async function previewDatasetVersion(version) {
   if (!dataset || !version) return;
   const key = detailKey("dataset", dataset.id);
   if (!state.details[key]) await loadResourceDetail("dataset", dataset.id);
+  if (state.details[key]?.selectedPreview === version) {
+    state.details[key] = {
+      ...(state.details[key] || {}),
+      selectedPreview: "",
+    };
+    renderCatalogDatasetDetail();
+    renderDatasetDetail();
+    return;
+  }
   try {
     const preview = await api(`/api/v1/datasets/${encodeURIComponent(dataset.id)}/versions/${encodeURIComponent(version)}/preview?limit=50`);
     state.details[key] = {
@@ -1596,10 +1782,24 @@ async function previewDatasetVersion(version) {
   }
   renderCatalogDatasetDetail();
   renderDatasetDetail();
+  scrollActiveDatasetPreviewIntoView();
+}
+
+function closeDatasetPreview() {
+  const dataset = findResource("dataset", state.selected.dataset);
+  if (!dataset) return;
+  const key = detailKey("dataset", dataset.id);
+  if (!state.details[key]?.selectedPreview) return;
+  state.details[key] = {
+    ...(state.details[key] || {}),
+    selectedPreview: "",
+  };
+  renderCatalogDatasetDetail();
+  renderDatasetDetail();
 }
 
 async function useDatasetVersionForTraining(datasetRef) {
-  if (!datasetRef) return;
+  if (!datasetRef || !state.currentProjectId) return;
   const datasetId = datasetRef.split("@")[0];
   const dataset = findResource("dataset", datasetId);
   const compatibleTemplate = executableTemplates().find((template) => {
@@ -1614,17 +1814,28 @@ async function useDatasetVersionForTraining(datasetRef) {
   await loadTrainingVersions();
   state.trainingForm.defaults = { datasetRef, templateId: compatibleTemplate?.id || "" };
   renderTrainingForm();
+  $("#trainingJobForm")?.scrollIntoView?.({ block: "nearest" });
 }
 
 async function archiveDataset(datasetId) {
   if (!datasetId) return;
   const archived = await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`, { method: "DELETE" });
   const index = state.dashboard.datasets.findIndex((item) => item.id === datasetId);
-  if (index >= 0) state.dashboard.datasets[index] = { ...state.dashboard.datasets[index], ...archived };
+  const current = index >= 0 ? state.dashboard.datasets[index] : findResource("dataset", datasetId);
+  const archivedWithSummary = { ...(current || {}), ...archived };
+  if (index >= 0) {
+    if (!state.currentProjectId && state.catalog.status === "active") {
+      state.dashboard.datasets.splice(index, 1);
+      state.selected.dataset = state.dashboard.datasets[0]?.id || null;
+    } else {
+      state.dashboard.datasets[index] = archivedWithSummary;
+    }
+  }
+  state.catalog.archivedDatasets = [archivedWithSummary, ...state.catalog.archivedDatasets.filter((item) => item.id !== datasetId)];
   state.trainingForm.versions = [];
   delete state.details[detailKey("dataset", datasetId)];
   render();
-  await loadResourceDetail("dataset", datasetId);
+  if (state.selected.dataset) await loadResourceDetail("dataset", state.selected.dataset);
 }
 
 async function restoreDataset(datasetId) {
@@ -1632,10 +1843,15 @@ async function restoreDataset(datasetId) {
   const restored = await api(`/api/v1/datasets/${encodeURIComponent(`${datasetId}:restore`)}`, { method: "POST", body: JSON.stringify({}) });
   const index = state.dashboard.datasets.findIndex((item) => item.id === datasetId);
   if (index >= 0) state.dashboard.datasets[index] = { ...state.dashboard.datasets[index], ...restored };
+  if (!state.dashboard.datasets.some((item) => item.id === datasetId)) state.dashboard.datasets.unshift(restored);
+  state.catalog.archivedDatasets = state.catalog.archivedDatasets.filter((item) => item.id !== datasetId);
+  if (!state.currentProjectId && state.catalog.status === "archived") {
+    state.selected.dataset = state.catalog.archivedDatasets[0]?.id || null;
+  }
   state.trainingForm.versions = [];
   delete state.details[detailKey("dataset", datasetId)];
   render();
-  await loadResourceDetail("dataset", datasetId);
+  if (state.selected.dataset) await loadResourceDetail("dataset", state.selected.dataset);
 }
 
 async function unlinkProjectDataset(datasetId) {
@@ -1725,6 +1941,12 @@ document.addEventListener("click", (event) => {
     applyView(metricLink.dataset.viewTarget);
     return;
   }
+  const catalogStatusButton = event.target.closest("[data-catalog-status]");
+  if (catalogStatusButton) {
+    event.preventDefault();
+    setCatalogStatus(catalogStatusButton.dataset.catalogStatus);
+    return;
+  }
   const editFailedButton = event.target.closest("[data-edit-failed-job]");
   if (editFailedButton) {
     event.preventDefault();
@@ -1764,6 +1986,11 @@ document.addEventListener("click", (event) => {
   if (previewButton) {
     event.preventDefault();
     previewDatasetVersion(previewButton.dataset.previewDatasetVersion);
+    return;
+  }
+  if (event.target.closest("[data-close-dataset-preview]")) {
+    event.preventDefault();
+    closeDatasetPreview();
     return;
   }
   const useVersionButton = event.target.closest("[data-use-dataset-version]");

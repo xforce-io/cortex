@@ -62,7 +62,13 @@
             <div class="project-grid" id="projectCards"></div>
             <div class="section-header">
               <h2 data-i18n="field.datasetCatalog">数据集目录</h2>
-              <span id="catalogDatasetCount">0 条记录</span>
+              <div class="section-actions">
+                <div class="segmented-control" role="group" aria-label="Dataset catalog status">
+                  <button class="tab active" type="button" data-catalog-status="active" data-i18n="field.active">Active</button>
+                  <button class="tab" type="button" data-catalog-status="archived" data-i18n="field.archived">Archived</button>
+                </div>
+                <span id="catalogDatasetCount">0 条记录</span>
+              </div>
             </div>
             <div class="table-wrap">
               <table>
