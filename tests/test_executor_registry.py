@@ -14,7 +14,7 @@ from cortex.executors.builtins import (
     builtin_executor_registry,
 )
 from cortex.executors.base import ExecutionResult
-from cortex.executors.capability_loader import parse_executor_entrypoint
+from cortex.executors.capability_loader import parse_executor_artifacts, parse_executor_entrypoint
 from cortex.executors.provenance import resolve_git_commit, sanitize_repo_url
 from cortex.executors.registry import ExecutorRegistry
 
@@ -95,6 +95,13 @@ class ExecutorRegistryTest(unittest.TestCase):
         self.assertNotIn("oauth2", sanitized)
         self.assertEqual(sanitize_repo_url("/Users/xupeng/private/repo"), "")
         self.assertEqual(sanitize_repo_url("file:///Users/xupeng/private/repo"), "")
+
+    def test_rejects_external_artifact_paths_outside_work_dir(self):
+        with self.assertRaisesRegex(ValueError, "EXECUTOR_ARTIFACT_PATH_INVALID"):
+            parse_executor_artifacts([{"path": "../secret.txt"}])
+
+        with self.assertRaisesRegex(ValueError, "EXECUTOR_ARTIFACT_TARGET_INVALID"):
+            parse_executor_artifacts([{"path": "outputs/file.txt", "target": "../file.txt"}])
 
     def test_resolves_git_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,6 +318,193 @@ class Executor:
                 serialized = json.dumps({"job": job, "run": run, "model": model_payload})
                 self.assertNotIn("secret-token", serialized)
                 self.assertNotIn("oauth2", serialized)
+            finally:
+                app.conn.close()
+
+    def test_external_executor_manifest_artifacts_are_collected_and_imported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "artifact-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: artifact-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: external-artifact-executor
+    name: External Artifact Executor
+    description: Writes declared artifacts.
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema: {}
+    artifacts:
+      - path: outputs/model.txt
+        target: external/model.txt
+        required: true
+        kind: model
+      - path: outputs/pred_result.npz
+        target: predictions/pred_result.npz
+        required: true
+        kind: prediction_result
+        import_result: true
+      - path: outputs/eval_summary.csv
+        target: reports/eval_summary.csv
+        required: false
+        kind: report
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Executor:
+    def run(self, context):
+        import numpy as np
+
+        outputs = context.work_dir / "outputs"
+        outputs.mkdir(parents=True, exist_ok=True)
+        (outputs / "model.txt").write_text("model payload", encoding="utf-8")
+        (outputs / "eval_summary.csv").write_text("metric,value\\nrmse,0.0\\n", encoding="utf-8")
+        np.savez(outputs / "pred_result.npz", y_true=np.array([1.0, 2.0]), y_pred=np.array([1.0, 2.0]))
+        return ExecutionResult(metrics={"rows": 2}, model_payload={"modelKind": "external_artifact"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "artifact-contract"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "artifact-train.csv"
+                source.write_text("x,y\n1,2\n3,4\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/artifact/v1/train.csv", source)
+                dataset = app.create_dataset("artifact", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/artifact/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "external-artifact-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/artifact",
+                    {},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+                run = app.get_run(job["mlflowRunId"])
+                results = app.list_experiment_results()
+
+                self.assertEqual(job["status"], "succeeded")
+                self.assertIn("external/model.txt", run["artifacts"])
+                self.assertIn("predictions/pred_result.npz", run["artifacts"])
+                self.assertIn("reports/eval_summary.csv", run["artifacts"])
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["experimentName"], "demo/artifact")
+                self.assertEqual(results[0]["methodId"], "external-artifact-executor")
+                self.assertEqual(results[0]["methodKind"], "external")
+                self.assertEqual(results[0]["datasetRef"], f"{dataset['id']}@{version['version']}")
+                self.assertEqual(results[0]["metrics"]["rows"], 2)
+            finally:
+                app.conn.close()
+
+    def test_external_executor_missing_required_artifact_fails_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "missing-artifact-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: missing-artifact-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: missing-artifact-executor
+    name: Missing Artifact Executor
+    description: Does not write a required artifact.
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema: {}
+    artifacts:
+      - path: outputs/required.txt
+        target: external/required.txt
+        required: true
+        kind: artifact
+      - path: outputs/optional.txt
+        target: external/optional.txt
+        required: false
+        kind: artifact
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Executor:
+    def run(self, context):
+        return ExecutionResult(metrics={"rows": 0}, model_payload={"modelKind": "missing_artifact"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "missing-artifact-contract"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "missing-artifact-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/missing-artifact/v1/train.csv", source)
+                dataset = app.create_dataset("missing-artifact", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/missing-artifact/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "missing-artifact-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/missing-artifact",
+                    {},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("EXECUTOR_ARTIFACT_MISSING:outputs/required.txt", job["errorMessage"])
+                self.assertEqual(app.list_experiment_results(), [])
             finally:
                 app.conn.close()
 
