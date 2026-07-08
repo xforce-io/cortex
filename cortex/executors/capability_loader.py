@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from ..db import dump
-from .external import CapabilityExecutorSpec, CapabilityExecutorWrapper
+from .external import CapabilityExecutorSpec, CapabilityExecutorWrapper, ExecutorArtifactContract
 from .provenance import resolve_git_commit, sanitize_repo_url
 
 
@@ -89,6 +89,7 @@ def build_executor_spec(repo_path: Path, manifest_path: Path, capability_name: s
         raise ValueError("EXECUTOR_PARAM_SCHEMA_REQUIRED")
     if not entrypoint.startswith("python:"):
         raise ValueError("EXECUTOR_ENTRYPOINT_UNSUPPORTED")
+    artifacts = parse_executor_artifacts(item.get("artifacts"))
     source_repo = git_remote_url(repo_path)
     git_commit = resolve_git_commit(repo_path, "HEAD")
     return CapabilityExecutorSpec(
@@ -106,7 +107,44 @@ def build_executor_spec(repo_path: Path, manifest_path: Path, capability_name: s
         source_repo=source_repo,
         git_ref="HEAD",
         git_commit=git_commit,
+        artifacts=artifacts,
     )
+
+
+def parse_executor_artifacts(raw_artifacts) -> list[ExecutorArtifactContract]:
+    if raw_artifacts is None:
+        return []
+    if not isinstance(raw_artifacts, list):
+        raise ValueError("EXECUTOR_ARTIFACTS_INVALID")
+    artifacts = []
+    supported_kinds = {"artifact", "model", "prediction_result", "report", "metrics"}
+    for item in raw_artifacts:
+        if not isinstance(item, dict):
+            raise ValueError("EXECUTOR_ARTIFACT_INVALID")
+        path = str(item.get("path") or "").strip()
+        if not path:
+            raise ValueError("EXECUTOR_ARTIFACT_PATH_REQUIRED")
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise ValueError("EXECUTOR_ARTIFACT_PATH_INVALID")
+        kind = str(item.get("kind") or "artifact").strip()
+        if kind not in supported_kinds:
+            raise ValueError(f"EXECUTOR_ARTIFACT_KIND_UNSUPPORTED:{kind}")
+        import_result = bool(item.get("import_result", False))
+        if import_result and kind != "prediction_result":
+            raise ValueError("EXECUTOR_ARTIFACT_IMPORT_RESULT_KIND_INVALID")
+        target = str(item.get("target") or "").strip() or f"artifacts/{Path(path).name}"
+        if Path(target).is_absolute() or ".." in Path(target).parts:
+            raise ValueError("EXECUTOR_ARTIFACT_TARGET_INVALID")
+        artifacts.append(
+            ExecutorArtifactContract(
+                path=path,
+                target=target,
+                required=bool(item.get("required", True)),
+                kind=kind,
+                import_result=import_result,
+            )
+        )
+    return artifacts
 
 
 def load_capability_executor(spec: CapabilityExecutorSpec) -> CapabilityExecutorLoadResult:

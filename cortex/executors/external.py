@@ -4,6 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .base import ArtifactSpec
+
+
+@dataclass(frozen=True)
+class ExecutorArtifactContract:
+    path: str
+    target: str
+    required: bool = True
+    kind: str = "artifact"
+    import_result: bool = False
+
 
 @dataclass(frozen=True)
 class CapabilityExecutorSpec:
@@ -21,6 +32,7 @@ class CapabilityExecutorSpec:
     source_repo: str
     git_ref: str
     git_commit: str
+    artifacts: list[ExecutorArtifactContract]
 
     @property
     def manifest_relative_path(self) -> str:
@@ -50,4 +62,22 @@ class CapabilityExecutorWrapper:
         }
 
     def run(self, context):
-        return self.executor.run(context)
+        result = self.executor.run(context)
+        dataset_ref = f"{context.version['datasetId']}@{context.version['version']}"
+        for artifact in self.spec.artifacts:
+            source_path = context.work_dir / artifact.path
+            if not source_path.exists():
+                if artifact.required:
+                    raise ValueError(f"EXECUTOR_ARTIFACT_MISSING:{artifact.path}")
+                continue
+            result.artifacts.append(ArtifactSpec(source_path, artifact.target))
+            if artifact.kind == "prediction_result" and artifact.import_result:
+                context.app.import_prediction_result(
+                    context.job["experimentName"],
+                    self.template_id,
+                    self.model_type,
+                    source_path,
+                    created_by=context.job["owner"],
+                    dataset_ref=dataset_ref,
+                )
+        return result
