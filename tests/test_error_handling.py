@@ -1,14 +1,20 @@
+import concurrent.futures
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import unittest
 
+from cortex import api
 from cortex.app import CortexApp
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +29,7 @@ class TestAPIErrorHandling(unittest.TestCase):
         self.app = CortexApp.open(self.home)
 
     def tearDown(self):
+        self.app.conn.close()
         self.tmp.cleanup()
 
     def test_api_404_returns_generic_error(self):
@@ -67,10 +74,39 @@ class TestAPIErrorHandling(unittest.TestCase):
 
     def test_api_500_returns_generic_error(self):
         """Test that server errors return generic messages without details."""
+        class BrokenApp:
+            conn = None
+
+            def healthz(self):
+                raise RuntimeError("secret path /tmp/cortex.db line 42")
+
+        original_factory = api.Handler.app_factory
+        api.Handler.app_factory = staticmethod(lambda: BrokenApp())
+        server = ThreadingHTTPServer(("127.0.0.1", 0), api.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/healthz"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self._api_get(url)
+
+            response = cm.exception
+            self.assertEqual(response.code, 500)
+            payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload, {"error": "INTERNAL_SERVER_ERROR"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            api.Handler.app_factory = original_factory
+
+    def test_api_handles_concurrent_dataset_writes(self):
+        """Test that concurrent requests do not share a SQLite connection."""
+        port = self._free_port()
         env = os.environ.copy()
         env["CORTEX_HOME"] = str(self.home)
         env["CORTEX_HOST"] = "127.0.0.1"
-        env["CORTEX_PORT"] = "8802"
+        env["CORTEX_PORT"] = str(port)
         env["PYTHONPATH"] = str(ROOT)
         server = subprocess.Popen(
             [sys.executable, "-m", "cortex.api"],
@@ -80,37 +116,21 @@ class TestAPIErrorHandling(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         try:
-            self._wait_for_health("http://127.0.0.1:8802/healthz")
+            self._wait_for_health(f"http://127.0.0.1:{port}/healthz")
 
-            # Create a dataset first
-            dataset = self._api_post(
-                "http://127.0.0.1:8802/api/v1/datasets",
-                {"name": "error-test", "type": "tabular", "owner": "alice", "team": "ml"},
-            )
+            def create_dataset(index: int) -> tuple[int, str]:
+                return self._api_post_status(
+                    f"http://127.0.0.1:{port}/api/v1/datasets",
+                    {"name": f"concurrent-{index}", "type": "tabular", "owner": "alice", "team": "ml"},
+                )
 
-            # Try to get a non-existent dataset version (triggers ValueError)
-            with self.assertRaises(urllib.error.HTTPError) as cm:
-                self._api_get(f"http://127.0.0.1:8802/api/v1/datasets/{dataset['id']}/versions/nonexistent")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                results = list(executor.map(create_dataset, range(40)))
 
-            response = cm.exception
-            self.assertEqual(response.code, 400)
-
-            # Read the error response
-            body = response.read().decode("utf-8")
-            payload = json.loads(body)
-
-            # Should have error field but not expose sensitive details
-            self.assertIn("error", payload)
-
-            # Should NOT have fields like 'traceback', 'exception', 'details'
-            self.assertNotIn("traceback", payload)
-            self.assertNotIn("exception", payload)
-            # Should not expose file paths or line numbers
-            self.assertNotIn("File", payload.get("error", ""))
-            self.assertNotIn("line", payload.get("error", ""))
-
+            failures = [(status, body) for status, body in results if status != 201]
+            self.assertEqual(failures, [])
         finally:
-            server.send_signal(subprocess.signal.SIGINT)
+            server.send_signal(signal.SIGINT)
             server.wait(timeout=5)
 
     def test_api_422_returns_missing_field_error(self):
@@ -166,11 +186,23 @@ class TestAPIErrorHandling(unittest.TestCase):
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _api_post_status(self, url: str, payload: dict) -> tuple[int, str]:
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(request, timeout=8) as response:
-                return json.loads(response.read().decode("utf-8"))
+                return response.status, response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise
+            return exc.code, exc.read().decode("utf-8")
+
+    def _free_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
 
 
 if __name__ == "__main__":

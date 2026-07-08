@@ -153,14 +153,14 @@ docker compose -f deploy/docker-compose.yml up --build
 
 ### SQLite Thread Safety
 
-Cortex uses SQLite with `check_same_thread=False` and WAL mode (Write-Ahead Logging) enabled. This configuration is intentional for this local prototype:
+Cortex uses SQLite with WAL mode (Write-Ahead Logging) enabled. API requests open their own `CortexApp` and SQLite connection instead of sharing one connection across request threads.
 
 - **WAL mode** enables concurrent readers while a writer is active
-- **`check_same_thread=False`** allows the same connection to be shared across threads, which simplifies the implementation for a local development tool
+- **Per-request connections** avoid cross-thread SQLite connection sharing in the threaded development server
 
 This configuration is well-suited for:
 - Single-user local development
-- Low-to-moderate concurrency workloads
+- Light concurrent API usage
 - Prototyping and experimentation
 
 For production multi-user deployments, consider:

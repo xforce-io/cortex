@@ -180,7 +180,7 @@ class CortexApp:
         ts = now()
         self.conn.execute(
             """
-            INSERT INTO projects(id, name, description, owner, team, status, created_at, updated_at)
+            INSERT OR IGNORE INTO projects(id, name, description, owner, team, status, created_at, updated_at)
             VALUES ('proj_default', 'Default Project', 'Legacy workspace assets', 'system', 'default', 'active', ?, ?)
             """,
             (ts, ts),
@@ -205,7 +205,7 @@ class CortexApp:
         for row in rows:
             self.conn.execute(
                 """
-                INSERT INTO project_dataset_links(id, project_id, dataset_id, role, version_policy, added_by, added_at, notes)
+                INSERT OR IGNORE INTO project_dataset_links(id, project_id, dataset_id, role, version_policy, added_by, added_at, notes)
                 VALUES (?, 'proj_default', ?, 'train', 'latest', ?, ?, 'legacy workspace backfill')
                 """,
                 (f"pdl_{uuid4().hex[:12]}", row["id"], row["owner"] or "system", ts),

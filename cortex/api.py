@@ -3,14 +3,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .app import CortexApp
 from . import logging as cortex_logging
-from sqlite3 import IntegrityError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +16,27 @@ WEB_ROOT = ROOT / "web"
 
 
 class Handler(BaseHTTPRequestHandler):
-    app = None
+    app_factory = staticmethod(CortexApp.open)
+
+    def __init__(self, *args, **kwargs):
+        self._app: CortexApp | None = None
+        super().__init__(*args, **kwargs)
+
+    @property
+    def app(self) -> CortexApp:
+        if self._app is None:
+            self._app = type(self).app_factory()
+        return self._app
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if self._app is not None:
+                conn = getattr(self._app, "conn", None)
+                if conn is not None:
+                    conn.close()
+                self._app = None
 
     def _json(self, status: int, payload) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -315,7 +333,6 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     host = os.environ.get("CORTEX_HOST", "0.0.0.0")
     port = int(os.environ.get("CORTEX_PORT", "8768"))
-    Handler.app = CortexApp.open()
     server = ThreadingHTTPServer((host, port), Handler)
     cortex_logging.info("cortex api listening on http://%s:%s", host, port)
     server.serve_forever()
