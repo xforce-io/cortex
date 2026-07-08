@@ -1,0 +1,84 @@
+services:
+  cortex-app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: cortex-app:dev
+    depends_on:
+      - cortex-db
+      - mlflow
+      - minio
+    environment:
+      CORTEX_HOME: /var/lib/cortex
+      CORTEX_DATABASE_URL: postgresql://cortex:cortex@cortex-db:5432/cortex
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+    ports:
+      - "8000:8000"
+    volumes:
+      - cortex-data:/var/lib/cortex
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  mlflow:
+    build:
+      context: ..
+      dockerfile: deploy/mlflow.Dockerfile
+    image: cortex-mlflow:dev
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://mlflow:mlflow@mlflow-db:5432/mlflow
+      --default-artifact-root s3://mlflow-artifacts
+    depends_on:
+      - mlflow-db
+      - minio
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+    ports:
+      - "5000:5000"
+
+  cortex-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: cortex
+      POSTGRES_DB: cortex
+    volumes:
+      - cortex-db-data:/var/lib/postgresql/data
+
+  mlflow-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - mlflow-db-data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  cortex-data:
+  cortex-db-data:
+  mlflow-db-data:
+  minio-data:

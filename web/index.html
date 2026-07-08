@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cortex Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航" data-i18n-aria-label="aria.primary">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div>
+            <div class="brand-name">Cortex</div>
+            <div class="brand-subtitle" data-i18n="brand.subtitle">机器学习平台</div>
+          </div>
+        </div>
+        <nav class="nav-list">
+          <button class="nav-item active" data-view="dashboard" data-i18n="nav.dashboard">仪表盘</button>
+          <button class="nav-item" data-view="datasets" data-i18n="nav.datasets">数据集</button>
+          <button class="nav-item" data-view="training" data-i18n="nav.training">训练</button>
+          <button class="nav-item" data-view="runs" data-i18n="nav.runs">实验</button>
+          <button class="nav-item" data-view="results" data-i18n="nav.results">结果</button>
+          <button class="nav-item" data-view="models" data-i18n="nav.models">模型</button>
+          <button class="nav-item" data-view="tests" data-i18n="nav.tests">评估</button>
+        </nav>
+        <div class="sidebar-status">
+          <span class="status-dot" id="healthDot"></span>
+          <span id="healthText">检查中</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 data-i18n="page.workspace">工作区</h1>
+            <p id="lastUpdated">尚未同步</p>
+          </div>
+          <div class="toolbar">
+            <label class="locale-control" for="localeSelect">
+              <span data-i18n="locale.label">语言</span>
+              <select id="localeSelect" class="locale-select" aria-label="语言" data-i18n-aria-label="locale.label">
+                <option value="zh-CN">中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <button class="secondary-button" id="projectBackButton" hidden data-i18n="page.projects">项目</button>
+            <button class="icon-button" id="refreshButton" title="刷新" aria-label="刷新" data-i18n-title="action.refresh" data-i18n-aria-label="action.refresh">
+              <span aria-hidden="true">↻</span>
+              <span data-i18n="action.refreshData">刷新数据</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="dashboard" class="dashboard-view active">
+          <section class="project-landing" id="projectLanding">
+            <div class="section-header">
+              <h2 data-i18n="page.projects">项目</h2>
+              <span id="projectCount">0 条记录</span>
+            </div>
+            <div class="project-grid" id="projectCards"></div>
+            <div class="section-header">
+              <h2 data-i18n="field.datasetCatalog">数据集目录</h2>
+              <div class="section-actions">
+                <div class="segmented-control" role="group" aria-label="Dataset catalog status">
+                  <button class="tab active" type="button" data-catalog-status="active" data-i18n="field.active">Active</button>
+                  <button class="tab" type="button" data-catalog-status="archived" data-i18n="field.archived">Archived</button>
+                </div>
+                <span id="catalogDatasetCount">0 条记录</span>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th data-i18n="field.name">名称</th><th data-i18n="field.type">类型</th><th data-i18n="field.versions">版本</th><th data-i18n="field.latest">最新</th><th data-i18n="field.owner">负责人</th><th data-i18n="field.status">状态</th></tr>
+                </thead>
+                <tbody id="catalogDatasetsBody"></tbody>
+              </table>
+            </div>
+            <section class="resource-detail" id="catalogDatasetDetail" aria-live="polite"></section>
+          </section>
+
+          <div id="projectWorkspace" hidden>
+            <section class="metrics-grid" aria-label="摘要" data-i18n-aria-label="aria.summary">
+              <button class="metric metric-link" data-view-target="datasets" type="button">
+                <span data-i18n="metric.datasets">数据集</span>
+                <strong id="metricDatasets">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="training" type="button">
+                <span data-i18n="metric.jobs">任务</span>
+                <strong id="metricJobs">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="runs" type="button">
+                <span data-i18n="metric.runs">运行</span>
+                <strong id="metricRuns">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="models" type="button">
+                <span data-i18n="metric.models">模型</span>
+                <strong id="metricModels">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="tests" type="button">
+                <span data-i18n="metric.tests">测试</span>
+                <strong id="metricTests">0</strong>
+              </button>
+              <button class="metric metric-link" data-view-target="results" type="button">
+                <span data-i18n="metric.results">结果</span>
+                <strong id="metricResults">0</strong>
+              </button>
+            </section>
+
+            <section class="empty-state" id="emptyState">
+              <div>
+                <h2 data-i18n="empty.title">还没有机器学习资产</h2>
+                <p data-i18n="empty.copy">创建一个示例项目，在同一工作区查看数据集版本、训练运行、模型注册和评估结果。</p>
+              </div>
+              <button class="secondary-button" id="emptyImportButton" data-i18n="action.createExample">创建示例工作区</button>
+            </section>
+
+            <section class="workbench" id="overviewWorkbench">
+              <div class="panel lineage-panel">
+                <div class="panel-header">
+                  <h2 data-i18n="section.lineage">血缘</h2>
+                  <span id="lineageLabel">未选择运行</span>
+                </div>
+                <svg class="lineage-map" viewBox="0 0 720 180" role="img" aria-label="数据集到任务、运行、模型的血缘" data-i18n-aria-label="aria.lineage">
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                    </marker>
+                  </defs>
+                  <g class="edge">
+                    <line x1="160" y1="90" x2="270" y2="90"></line>
+                    <line x1="400" y1="90" x2="510" y2="90"></line>
+                  </g>
+                  <g class="node dataset-node">
+                    <rect x="20" y="45" width="140" height="90" rx="8"></rect>
+                    <text x="90" y="85" data-i18n="metric.datasetsSingular">数据集</text>
+                    <text x="90" y="110" id="lineageDataset">空</text>
+                  </g>
+                  <g class="node job-node">
+                    <rect x="270" y="45" width="130" height="90" rx="8"></rect>
+                    <text x="335" y="85" data-i18n="lineage.jobRun">任务 / 运行</text>
+                    <text x="335" y="110" id="lineageRun">空</text>
+                  </g>
+                  <g class="node model-node">
+                    <rect x="510" y="45" width="170" height="90" rx="8"></rect>
+                    <text x="595" y="85" data-i18n="lineage.modelAlias">模型别名</text>
+                    <text x="595" y="110" id="lineageModel">空</text>
+                  </g>
+                </svg>
+              </div>
+
+              <div class="panel chart-panel">
+                <div class="panel-header">
+                  <h2 data-i18n="section.runMetrics">运行指标</h2>
+                  <span>inertia / rows</span>
+                </div>
+                <canvas id="metricsCanvas" width="360" height="180" aria-label="运行指标图表" data-i18n-aria-label="aria.runMetrics"></canvas>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="datasets" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.datasets">数据集</h2>
+            <span id="datasetCount">0 条记录</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.name">名称</th><th data-i18n="field.type">类型</th><th data-i18n="field.versions">版本</th><th data-i18n="field.latest">最新</th><th data-i18n="field.owner">负责人</th><th data-i18n="field.status">状态</th></tr>
+              </thead>
+              <tbody id="datasetsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="datasetDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="training" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="page.trainingJobs">训练任务</h2>
+            <div class="section-actions">
+              <span id="jobCount">0 条记录</span>
+              <button class="primary-button" id="newJobButton" data-i18n="action.newTrainingJob">新建训练任务</button>
+            </div>
+          </div>
+          <section class="inline-form" id="trainingJobForm" hidden>
+            <form id="jobForm">
+              <div class="form-grid">
+                <label>
+                  <span data-i18n="field.template">模板</span>
+                  <select id="jobTemplate" name="templateId" required></select>
+                </label>
+                <label>
+                  <span data-i18n="field.datasetVersion">数据集版本</span>
+                  <select id="jobDataset" name="datasetRef" required></select>
+                </label>
+                <label>
+                  <span data-i18n="field.experiment">实验</span>
+                  <input id="jobExperiment" name="experimentName" value="manual/training" required />
+                </label>
+                <label>
+                  <span data-i18n="field.owner">负责人</span>
+                  <input name="owner" value="alice" required />
+                </label>
+                <label>
+                  <span data-i18n="field.team">团队</span>
+                  <input name="team" value="ml" required />
+                </label>
+              </div>
+              <div class="param-grid" id="jobParams"></div>
+              <div class="form-footer">
+                <p id="jobFormStatus"></p>
+                <div class="toolbar">
+                  <button class="secondary-button" type="button" id="cancelJobForm" data-i18n="action.cancel">取消</button>
+                  <button class="primary-button" type="submit" id="submitJobButton" data-i18n="action.submitJob">提交任务</button>
+                </div>
+              </div>
+            </form>
+          </section>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.job">任务</th><th data-i18n="field.template">模板</th><th data-i18n="field.status">状态</th><th data-i18n="field.run">运行</th><th data-i18n="field.owner">负责人</th></tr>
+              </thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="jobDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="runs" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.runs">实验</h2>
+            <span id="runCount">0 条记录</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.run">运行</th><th data-i18n="field.status">状态</th><th data-i18n="field.dataset">数据集</th><th>Inertia</th><th data-i18n="field.rows">行数</th></tr>
+              </thead>
+              <tbody id="runsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="runDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="models" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.models">模型</h2>
+            <span id="modelCount">0 条记录</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.name">名称</th><th data-i18n="field.versions">版本</th><th>Champion</th><th>Challenger</th></tr>
+              </thead>
+              <tbody id="modelsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="modelDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="results" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.results">结果</h2>
+            <span id="resultCount">0 条记录</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.rank">排名</th><th data-i18n="field.method">方法</th><th data-i18n="field.kind">类别</th><th>RMSE</th><th>MAE</th><th>R2</th><th>MAPE</th><th>CV</th></tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="resultDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="tests" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.tests">评估</h2>
+            <span id="testCount">0 条记录</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th data-i18n="field.evaluation">评估</th><th data-i18n="field.model">模型</th><th data-i18n="field.trainDataset">训练数据集</th><th data-i18n="field.testSet">测试集</th><th data-i18n="field.testInertia">测试 Inertia</th><th data-i18n="field.status">状态</th></tr>
+              </thead>
+              <tbody id="testsBody"></tbody>
+            </table>
+          </div>
+          <section class="resource-detail" id="evaluationDetail" aria-live="polite"></section>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
