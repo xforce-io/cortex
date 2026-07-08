@@ -602,6 +602,93 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(results[0]["datasetRef"], f"{dataset['id']}@v1")
         self.assertIn("rmse", results[0]["metrics"])
 
+    def test_sequence_forecast_registered_model_evaluates_on_eval_set(self):
+        self._skip_if_no_torch()
+        dataset = self.app.create_dataset("sequence-eval", "time_series", "alice", "ml")
+        train_source = self.home / "sequence-eval-train.csv"
+        train_rows = ["building,step,target,feature"]
+        for group in ["a", "b"]:
+            for i in range(70):
+                baseline = 4 if group == "a" else 7
+                train_rows.append(f"{group},{i},{baseline + (i % 9) * 0.3},{(i % 4) * 0.2}")
+        train_source.write_text("\n".join(train_rows), encoding="utf-8")
+        train_uri = "s3://datasets/sequence-eval/v1/train.csv"
+        self.app.storage.put_file(train_uri, train_source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", train_uri, "csv", created_by="alice")
+
+        job = self.app.submit_training_job(
+            "pytorch-sequence-forecast",
+            f"{dataset['id']}@{version['version']}",
+            "demo/sequence-eval",
+            {
+                "time_column": "step",
+                "target_column": "target",
+                "group_column": "building",
+                "feature_columns": "feature,target",
+                "window": 6,
+                "horizon": 1,
+                "epochs": 2,
+                "hidden_size": 4,
+                "learning_rate": 0.01,
+                "seed": 17,
+            },
+            "alice",
+            "ml",
+            wait=True,
+        )
+        model_version = self.app.register_model_version("sequence-eval-model", job["mlflowRunId"], "model", "sequence evaluation")
+
+        eval_dataset = self.app.create_dataset("sequence-eval-test", "eval_set", "alice", "ml")
+        eval_source = self.home / "sequence-eval-test.csv"
+        eval_rows = ["building,step,target,feature"]
+        for group in ["a", "b"]:
+            for i in range(40):
+                baseline = 4 if group == "a" else 7
+                eval_rows.append(f"{group},{i},{baseline + (i % 9) * 0.35},{(i % 4) * 0.25}")
+        eval_source.write_text("\n".join(eval_rows), encoding="utf-8")
+        eval_uri = "s3://datasets/sequence-eval-test/v1/test.csv"
+        self.app.storage.put_file(eval_uri, eval_source)
+        eval_version = self.app.add_dataset_version(eval_dataset["id"], "v1", eval_uri, "csv", created_by="alice")
+
+        evaluation = self.app.evaluate_model_version(
+            "sequence-eval-model",
+            model_version["version"],
+            f"{eval_dataset['id']}@{eval_version['version']}",
+            "alice",
+            "ml",
+        )
+
+        self.assertEqual(evaluation["status"], "succeeded")
+        self.assertIn("test_rmse", evaluation["metrics"])
+        self.assertIn("test_mae", evaluation["metrics"])
+        self.assertIn("test_r2", evaluation["metrics"])
+        self.assertEqual(evaluation["metrics"]["test_rows"], 68)
+        self.assertEqual(evaluation["metrics"]["test_groups"], 2)
+
+    def test_sequence_forecast_evaluation_rejects_missing_weights(self):
+        self._skip_if_no_torch()
+        dataset = self.app.create_dataset("sequence-missing-weights", "time_series", "alice", "ml")
+        source = self.home / "sequence-missing-weights.csv"
+        rows = ["step,target"]
+        for i in range(50):
+            rows.append(f"{i},{2 + (i % 5) * 0.4}")
+        source.write_text("\n".join(rows), encoding="utf-8")
+        uri = "s3://datasets/sequence-missing-weights/v1/train.csv"
+        self.app.storage.put_file(uri, source)
+        version = self.app.add_dataset_version(dataset["id"], "v1", uri, "csv", created_by="alice")
+        params = {"time_column": "step", "target_column": "target", "window": 4, "horizon": 1, "epochs": 1, "hidden_size": 4}
+        job = self.app.submit_training_job("pytorch-sequence-forecast", f"{dataset['id']}@{version['version']}", "demo/sequence-missing-weights", params, "alice", "ml", wait=True)
+        model_version = self.app.register_model_version("sequence-missing-weights-model", job["mlflowRunId"], "model", "sequence missing weights")
+        (self.app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.pt").unlink()
+
+        eval_dataset = self.app.create_dataset("sequence-missing-weights-test", "eval_set", "alice", "ml")
+        eval_uri = "s3://datasets/sequence-missing-weights-test/v1/test.csv"
+        self.app.storage.put_file(eval_uri, source)
+        eval_version = self.app.add_dataset_version(eval_dataset["id"], "v1", eval_uri, "csv", created_by="alice")
+
+        with self.assertRaisesRegex(ValueError, "MODEL_ARTIFACT_NOT_FOUND"):
+            self.app.evaluate_model_version("sequence-missing-weights-model", model_version["version"], f"{eval_dataset['id']}@{eval_version['version']}", "alice", "ml")
+
     def test_sequence_forecast_warm_start_trains_from_registered_model(self):
         self._skip_if_no_torch()
         dataset = self.app.create_dataset("sequence-warm-start", "time_series", "alice", "ml")
