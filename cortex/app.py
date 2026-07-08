@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import logging as cortex_logging
 from .db import connect, decode_row, dump, load
 from .executors import ExecutionResult, TrainingContext, builtin_executor_registry
+from .executors.capability_loader import capability_repo_paths, load_capability_repositories
 from .executors.provenance import executor_provenance_for, flatten_executor_provenance
 from .mlflow_local import LocalMlflow
 from .storage import ObjectStorage
@@ -165,13 +166,21 @@ class CortexApp:
         self.storage = ObjectStorage(self.home / "objects")
         self.mlflow = LocalMlflow(self.conn, self.home / "mlruns")
         self.executor_registry = builtin_executor_registry()
+        self.executor_status_reasons = {}
         (self.home / "jobs").mkdir(exist_ok=True)
         self.ensure_default_project()
+        self._load_external_executors()
 
     @classmethod
     def open(cls, home: str | Path | None = None) -> "CortexApp":
         resolved = Path(home or os.environ.get("CORTEX_HOME", ".cortex")).expanduser().resolve()
         return cls(resolved)
+
+    def _load_external_executors(self) -> None:
+        paths = capability_repo_paths(os.environ.get("CORTEX_CAPABILITY_REPOS"))
+        if not paths:
+            return
+        self.executor_status_reasons.update(load_capability_repositories(paths, self.conn, self.executor_registry))
 
     def ensure_default_project(self) -> dict:
         row = decode_row(self.conn.execute("SELECT * FROM projects WHERE id = 'proj_default'").fetchone())
@@ -721,6 +730,7 @@ class CortexApp:
                 "datasetTypes": load(row["dataset_types"]),
                 "paramSchema": load(row["param_schema"]),
                 "executorStatus": self.executor_registry.status_for(row["id"]),
+                "executorStatusReason": self.executor_status_reasons.get(row["id"], ""),
                 "enabled": bool(row["enabled"]),
             }
             for row in rows

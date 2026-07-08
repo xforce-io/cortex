@@ -1,5 +1,6 @@
 import tempfile
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from cortex.executors.builtins import (
     builtin_executor_registry,
 )
 from cortex.executors.base import ExecutionResult
+from cortex.executors.capability_loader import parse_executor_entrypoint
 from cortex.executors.provenance import resolve_git_commit, sanitize_repo_url
 from cortex.executors.registry import ExecutorRegistry
 
@@ -201,5 +203,179 @@ class ExecutorRegistryTest(unittest.TestCase):
                 serialized = json.dumps({"job": job, "run": run, "model": model_payload})
                 self.assertNotIn(secret, serialized)
                 self.assertNotIn("oauth2", serialized)
+            finally:
+                app.conn.close()
+
+    def test_rejects_entrypoint_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "capability"
+            root.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "EXECUTOR_ENTRYPOINT_OUTSIDE_CAPABILITY_ROOT"):
+                parse_executor_entrypoint(root, "python:../outside.executor:Executor")
+
+    def test_ai_capability_executor_manifest_is_loaded_and_runs_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "demo-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: demo-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: external-manifest-executor
+    name: External Manifest Executor
+    description: Loaded from capability manifest.
+    model_type: python
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema:
+      type: object
+      properties: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Executor:
+    def run(self, context):
+        rows = context.app._read_csv_numeric(context.version["storageUri"])
+        return ExecutionResult(
+            metrics={"rows": len(rows), "external_score": 1.0},
+            model_payload={"modelKind": "external_manifest", "rows": len(rows)},
+        )
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "remote", "add", "origin", "http://oauth2:secret-token@example.com/group/ai-capability.git?private_token=secret-token"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "commit-a"], cwd=repo, check=True, capture_output=True)
+            commit_a = resolve_git_commit(repo, "HEAD")
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                templates = {template["id"]: template for template in app.list_templates()}
+                self.assertEqual(templates["external-manifest-executor"]["executorStatus"], "available")
+                self.assertEqual(templates["external-manifest-executor"].get("executorStatusReason", ""), "")
+
+                source = root / "external-manifest-train.csv"
+                source.write_text("x,y\n1,2\n3,4\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/external-manifest/v1/train.csv", source)
+                dataset = app.create_dataset("external-manifest", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/external-manifest/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "external-manifest-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/external-manifest",
+                    {},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+                run = app.get_run(job["mlflowRunId"])
+                model_payload = json.loads((app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+
+                (src / "executor.py").write_text((src / "executor.py").read_text(encoding="utf-8") + "\nVERSION = 'b'\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "-m", "commit-b"], cwd=repo, check=True, capture_output=True)
+                commit_b = resolve_git_commit(repo, "HEAD")
+
+                self.assertNotEqual(commit_a, commit_b)
+                self.assertEqual(job["status"], "succeeded")
+                self.assertEqual(job["executorProvenance"]["kind"], "git")
+                self.assertEqual(job["executorProvenance"]["gitCommit"], commit_a)
+                self.assertEqual(run["tags"]["executor.gitCommit"], commit_a)
+                self.assertEqual(model_payload["executorProvenance"]["gitCommit"], commit_a)
+                self.assertEqual(app.get_training_job(job["id"])["executorProvenance"]["gitCommit"], commit_a)
+                serialized = json.dumps({"job": job, "run": run, "model": model_payload})
+                self.assertNotIn("secret-token", serialized)
+                self.assertNotIn("oauth2", serialized)
+            finally:
+                app.conn.close()
+
+    def test_bad_ai_capability_entrypoint_is_visible_but_not_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "bad-capability"
+            capability.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: bad-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: bad-entrypoint-executor
+    name: Bad Entrypoint Executor
+    model_type: python
+    dataset_types:
+      - tabular
+    entrypoint: python:src.missing:Executor
+    param_schema:
+      type: object
+      properties: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "bad"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                templates = {template["id"]: template for template in app.list_templates()}
+                self.assertEqual(templates["bad-entrypoint-executor"]["executorStatus"], "not_implemented")
+                self.assertIn("ENTRYPOINT_IMPORT_FAILED", templates["bad-entrypoint-executor"]["executorStatusReason"])
+
+                source = root / "bad-entrypoint-train.csv"
+                source.write_text("x,y\n1,2\n3,4\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/bad-entrypoint/v1/train.csv", source)
+                dataset = app.create_dataset("bad-entrypoint", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/bad-entrypoint/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "bad-entrypoint-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/bad-entrypoint",
+                    {},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:bad-entrypoint-executor", job["errorMessage"])
             finally:
                 app.conn.close()
