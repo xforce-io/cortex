@@ -1829,6 +1829,62 @@ class CortexApp:
         self.conn.commit()
         return self.get_experiment_result(result_id)
 
+    def import_prediction_results_manifest(self, manifest: str | Path, created_by: str = "unknown") -> dict:
+        manifest_path = Path(manifest).expanduser()
+        if not manifest_path.is_file():
+            raise ValueError("PREDICTION_MANIFEST_NOT_FOUND")
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("PREDICTION_MANIFEST_INVALID") from exc
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            raise ValueError("PREDICTION_MANIFEST_RESULTS_REQUIRED")
+
+        records = []
+        succeeded = 0
+        manifest_dir = manifest_path.parent
+        for index, item in enumerate(results):
+            source = item.get("source") if isinstance(item, dict) else None
+            method_id = item.get("methodId") if isinstance(item, dict) else None
+            record = {
+                "index": index,
+                "source": source or "",
+                "methodId": method_id or "",
+            }
+            try:
+                if not isinstance(item, dict):
+                    raise ValueError("PREDICTION_MANIFEST_ENTRY_INVALID")
+                experiment_name = item.get("experimentName")
+                if not isinstance(experiment_name, str) or not isinstance(method_id, str) or not isinstance(source, str):
+                    raise ValueError("PREDICTION_MANIFEST_ENTRY_REQUIRED")
+                if not experiment_name or not method_id or not source:
+                    raise ValueError("PREDICTION_MANIFEST_ENTRY_REQUIRED")
+                source_path = Path(source).expanduser()
+                if not source_path.is_absolute():
+                    source_path = manifest_dir / source_path
+                result = self.import_prediction_result(
+                    experiment_name,
+                    method_id,
+                    item.get("methodKind") or "",
+                    source_path,
+                    created_by=item.get("createdBy") or created_by,
+                    dataset_ref=item.get("datasetRef") or "",
+                )
+            except ValueError as exc:
+                record.update({"status": "failed", "error": str(exc)})
+            else:
+                succeeded += 1
+                record.update({"status": "succeeded", "result": result})
+            records.append(record)
+
+        return {
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": records,
+        }
+
     def get_experiment_result(self, result_id: str) -> dict:
         row = decode_row(self.conn.execute("SELECT * FROM experiment_results WHERE id = ?", (result_id,)).fetchone())
         if not row:

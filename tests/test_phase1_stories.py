@@ -1020,6 +1020,64 @@ class Phase1StoriesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PREDICTION_ARRAYS_REQUIRED"):
             self.app.import_prediction_result("generic-sequence", "method-a", "sequence", source, created_by="alice")
 
+    def test_import_prediction_results_manifest_keeps_item_failures_isolated(self):
+        import numpy as np
+
+        valid_a = self.home / "valid-a.npz"
+        valid_b = self.home / "valid-b.npz"
+        invalid = self.home / "invalid.npz"
+        np.savez(valid_a, y_true=np.array([1.0, 2.0]), y_pred=np.array([1.5, 1.5]))
+        np.savez(valid_b, y_true=np.array([10.0, 20.0, 30.0]), y_pred=np.array([9.0, 21.0, 29.0]))
+        np.savez(invalid, y_true=np.array([1.0, 2.0]))
+        manifest = self.home / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "experimentName": "generic-sequence",
+                            "methodId": "method-a",
+                            "methodKind": "sequence",
+                            "source": valid_a.name,
+                            "datasetRef": "dataset-a@v1",
+                            "createdBy": "alice",
+                        },
+                        {
+                            "experimentName": "generic-sequence",
+                            "methodId": "method-b",
+                            "methodKind": "sequence",
+                            "source": invalid.name,
+                            "createdBy": "alice",
+                        },
+                        {
+                            "experimentName": "generic-sequence",
+                            "methodId": "method-c",
+                            "source": valid_b.name,
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        summary = self.app.import_prediction_results_manifest(manifest, created_by="fallback-user")
+
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["succeeded"], 2)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual([item["status"] for item in summary["results"]], ["succeeded", "failed", "succeeded"])
+        self.assertEqual(summary["results"][0]["result"]["datasetRef"], "dataset-a@v1")
+        self.assertEqual(summary["results"][1]["error"], "PREDICTION_ARRAYS_REQUIRED")
+        self.assertEqual(summary["results"][2]["result"]["createdBy"], "fallback-user")
+        self.assertEqual(len(self.app.list_experiment_results()), 2)
+
+    def test_import_prediction_results_manifest_requires_results_array(self):
+        manifest = self.home / "bad-manifest.json"
+        manifest.write_text(json.dumps({"items": []}), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "PREDICTION_MANIFEST_RESULTS_REQUIRED"):
+            self.app.import_prediction_results_manifest(manifest)
+
     def test_prediction_result_mape_ignores_near_zero_targets(self):
         import numpy as np
 
@@ -1067,6 +1125,62 @@ class Phase1StoriesTest(unittest.TestCase):
 
         self.assertEqual(payload["metrics"]["rows"], 2)
         self.assertEqual(payload["methodId"], "method-a")
+
+    def test_cli_imports_prediction_results_manifest(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["PYTHONPATH"] = str(ROOT)
+        valid = self.home / "cli-valid.npz"
+        invalid = self.home / "cli-invalid.npz"
+        np.savez(valid, y_true=np.array([5.0, 6.0]), y_pred=np.array([4.0, 7.0]))
+        np.savez(invalid, y_true=np.array([1.0, 2.0]))
+        manifest = self.home / "cli-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"experimentName": "generic-sequence", "methodId": "method-a", "methodKind": "sequence", "source": valid.name},
+                        {"experimentName": "generic-sequence", "methodId": "method-b", "methodKind": "sequence", "source": invalid.name},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cortex.cli",
+                "experiment-result",
+                "import-manifest",
+                "--manifest",
+                str(manifest),
+                "--created-by",
+                "alice",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        listed = subprocess.run(
+            [sys.executable, "-m", "cortex.cli", "experiment-result", "list"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        self.assertEqual(payload["succeeded"], 1)
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["results"][1]["error"], "PREDICTION_ARRAYS_REQUIRED")
+        self.assertEqual(len(json.loads(listed.stdout)), 1)
 
     def test_api_completes_full_loop(self):
         env = os.environ.copy()
@@ -1241,6 +1355,53 @@ class Phase1StoriesTest(unittest.TestCase):
 
             self.assertEqual(result["metrics"]["rows"], 2)
             self.assertEqual(result["methodId"], "method-a")
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
+    def test_api_imports_prediction_results_manifest(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8772"
+        env["PYTHONPATH"] = str(ROOT)
+        valid = self.home / "api-valid.npz"
+        invalid = self.home / "api-invalid.npz"
+        np.savez(valid, y_true=np.array([10.0, 20.0]), y_pred=np.array([8.0, 21.0]))
+        np.savez(invalid, y_true=np.array([1.0, 2.0]))
+        manifest = self.home / "api-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"experimentName": "generic-sequence", "methodId": "method-a", "methodKind": "sequence", "source": valid.name},
+                        {"experimentName": "generic-sequence", "methodId": "method-b", "methodKind": "sequence", "source": invalid.name},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8772/healthz")
+            summary = self._api_post(
+                "http://127.0.0.1:8772/api/v1/experiment-results:import-manifest",
+                {"manifest": str(manifest), "createdBy": "alice"},
+            )
+            results = self._api_get("http://127.0.0.1:8772/api/v1/experiment-results")
+
+            self.assertEqual(summary["succeeded"], 1)
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(summary["results"][1]["error"], "PREDICTION_ARRAYS_REQUIRED")
+            self.assertEqual(len(results), 1)
         finally:
             server.send_signal(signal.SIGINT)
             server.wait(timeout=5)
