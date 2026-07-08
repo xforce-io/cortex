@@ -12,6 +12,14 @@ The implementation is intentionally small and file-backed:
 
 ## Quick Start
 
+From a clean checkout, create a virtual environment and install the package first:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+```
+
 ```bash
 export CORTEX_HOME=.cortex
 export CORTEX_HOST=127.0.0.1
@@ -53,6 +61,7 @@ Templates are seeded into the `training_templates` table on database initializat
 | `sklearn-regressor` | regression | `tabular` | `target` | available |
 | `sklearn-classifier` | classification | `tabular` | `target` | not implemented |
 | `statsmodels-mstl` | forecasting | `time_series` | `periods`, `value_column`, `time_column`, `trend`, `max_iter` | available |
+| `pytorch-sequence-forecast` | forecasting | `time_series` | `time_column`, `target_column`, `window`, `horizon`, `epochs` | available with PyTorch |
 | `pytorch-basic` | training | `tabular`, `time_series` | `epochs` | not implemented |
 
 `sklearn-kmeans` writes a `model/model.json` artifact containing cluster centers and logs `inertia` and `rows`.
@@ -81,10 +90,18 @@ python -m cortex.cli train templates
 
 Example training submission:
 
+The example below expects the demo workspace to exist. Create it from the Dashboard with `Create example workspace`, or call:
+
+```bash
+curl --noproxy '*' -X POST http://127.0.0.1:8768/api/v1/demo/full-test \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
 ```bash
 python -m cortex.cli train submit \
   --template sklearn-kmeans \
-  --dataset ds_example@v1 \
+  --dataset ds_e2e_blobs@v1 \
   --experiment demo/example \
   --param n_clusters=3 \
   --owner alice \
@@ -96,9 +113,11 @@ python -m cortex.cli train submit \
 
 ```bash
 export CORTEX_HOME=.cortex
+export CORTEX_HOST=127.0.0.1
+export CORTEX_PORT=8768
 python -m cortex.api
-curl --noproxy '*' http://127.0.0.1:8000/healthz
-curl --noproxy '*' http://127.0.0.1:8000/api/v1/dashboard
+curl --noproxy '*' http://127.0.0.1:8768/healthz
+curl --noproxy '*' http://127.0.0.1:8768/api/v1/dashboard
 ```
 
 Useful endpoints:
@@ -117,6 +136,7 @@ Useful endpoints:
 ## Tests
 
 ```bash
+python -m pip install pytest torch
 python -m pytest tests/test_phase1_stories.py -q
 ```
 
