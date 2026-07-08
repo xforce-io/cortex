@@ -1895,6 +1895,102 @@ class CortexApp:
         rows = self.conn.execute("SELECT * FROM experiment_results ORDER BY created_at DESC").fetchall()
         return [public_experiment_result(decode_row(row)) for row in rows]
 
+    def compare_experiment_results(
+        self,
+        experiment_name: str,
+        dataset_ref: str = "",
+        method_kind: str = "",
+        sort_by: str = "rmse",
+        sort_order: str = "asc",
+    ) -> dict:
+        if not experiment_name:
+            raise ValueError("EXPERIMENT_NAME_REQUIRED")
+        supported_sort_fields = {"rmse", "mae", "r2", "cv", "mape", "rows", "createdAt", "methodId"}
+        if sort_by not in supported_sort_fields:
+            raise ValueError("EXPERIMENT_COMPARISON_SORT_UNSUPPORTED")
+        if sort_order not in {"asc", "desc"}:
+            raise ValueError("EXPERIMENT_COMPARISON_SORT_ORDER_UNSUPPORTED")
+
+        clauses = ["experiment_name = ?"]
+        params: list[str] = [experiment_name]
+        if dataset_ref:
+            clauses.append("dataset_ref = ?")
+            params.append(dataset_ref)
+        if method_kind:
+            clauses.append("method_kind = ?")
+            params.append(method_kind)
+        rows = self.conn.execute(
+            f"SELECT * FROM experiment_results WHERE {' AND '.join(clauses)} ORDER BY created_at ASC, id ASC",
+            tuple(params),
+        ).fetchall()
+        result_rows = [
+            {
+                "rank": 0,
+                "resultId": result["id"],
+                "methodId": result["methodId"],
+                "methodKind": result["methodKind"],
+                "datasetRef": result["datasetRef"],
+                "createdAt": result["createdAt"],
+                "metrics": result["metrics"],
+                "best": {},
+            }
+            for result in [public_experiment_result(decode_row(row)) for row in rows]
+        ]
+        best_values = self._experiment_comparison_best_values(result_rows)
+        for row in result_rows:
+            row["best"] = {
+                metric: self._metric_is_best(row["metrics"].get(metric), best_value)
+                for metric, best_value in best_values.items()
+            }
+
+        if sort_by in {"createdAt", "methodId"}:
+            result_rows.sort(key=lambda row: self._experiment_comparison_sort_key(row, sort_by), reverse=sort_order == "desc")
+        else:
+            result_rows.sort(key=lambda row: self._experiment_comparison_numeric_sort_key(row, sort_by, sort_order))
+        for index, row in enumerate(result_rows, start=1):
+            row["rank"] = index
+        return {
+            "experimentName": experiment_name,
+            "datasetRef": dataset_ref,
+            "methodKind": method_kind,
+            "sortBy": sort_by,
+            "sortOrder": sort_order,
+            "rows": result_rows,
+        }
+
+    def _experiment_comparison_best_values(self, rows: list[dict]) -> dict:
+        best_values = {}
+        for metric, lower_is_better in {"rmse": True, "mae": True, "cv": True, "mape": True, "r2": False, "rows": False}.items():
+            values = [
+                float(row["metrics"][metric])
+                for row in rows
+                if isinstance(row["metrics"].get(metric), (int, float))
+            ]
+            if not values:
+                best_values[metric] = None
+            else:
+                best_values[metric] = min(values) if lower_is_better else max(values)
+        return best_values
+
+    def _metric_is_best(self, value, best_value) -> bool:
+        if best_value is None or not isinstance(value, (int, float)):
+            return False
+        return float(value) == best_value
+
+    def _experiment_comparison_sort_key(self, row: dict, sort_by: str):
+        if sort_by == "createdAt":
+            return row["createdAt"]
+        if sort_by == "methodId":
+            return row["methodId"]
+        return ""
+
+    def _experiment_comparison_numeric_sort_key(self, row: dict, sort_by: str, sort_order: str):
+        value = row["metrics"].get(sort_by)
+        if not isinstance(value, (int, float)):
+            return (1, 0)
+        numeric = float(value)
+        return (0, numeric if sort_order == "asc" else -numeric)
+
     def list_alias_audits(self, name: str) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM model_alias_audits WHERE registered_model_name = ? ORDER BY created_at", (name,)).fetchall()
         return [

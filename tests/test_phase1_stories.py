@@ -1078,6 +1078,55 @@ class Phase1StoriesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PREDICTION_MANIFEST_RESULTS_REQUIRED"):
             self.app.import_prediction_results_manifest(manifest)
 
+    def test_compare_experiment_results_sorts_filters_and_marks_best_metrics(self):
+        import numpy as np
+
+        source_a = self.home / "compare-a.npz"
+        source_b = self.home / "compare-b.npz"
+        source_c = self.home / "compare-c.npz"
+        np.savez(source_a, y_true=np.array([10.0, 20.0, 30.0]), y_pred=np.array([10.0, 20.0, 30.0]))
+        np.savez(source_b, y_true=np.array([10.0, 20.0, 30.0]), y_pred=np.array([12.0, 18.0, 33.0]))
+        np.savez(source_c, y_true=np.array([10.0, 20.0, 30.0]), y_pred=np.array([20.0, 30.0, 40.0]))
+        self.app.import_prediction_result("compare-demo", "method-perfect", "sequence", source_a, dataset_ref="meter-a@v1")
+        self.app.import_prediction_result("compare-demo", "method-mid", "sequence", source_b, dataset_ref="meter-a@v1")
+        self.app.import_prediction_result("compare-demo", "method-other", "external", source_c, dataset_ref="meter-b@v1")
+        self.app.conn.execute(
+            """
+            INSERT INTO experiment_results(
+              id, experiment_name, method_id, method_kind, dataset_ref,
+              metrics, artifact_uri, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "er_missing_metric",
+                "compare-demo",
+                "method-missing",
+                "sequence",
+                "meter-a@v1",
+                json.dumps({"rows": 3}),
+                "s3://experiment-results/missing/predictions.npz",
+                "alice",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        self.app.conn.commit()
+
+        comparison = self.app.compare_experiment_results("compare-demo", dataset_ref="meter-a@v1")
+
+        self.assertEqual(comparison["experimentName"], "compare-demo")
+        self.assertEqual(comparison["datasetRef"], "meter-a@v1")
+        self.assertEqual([row["methodId"] for row in comparison["rows"]], ["method-perfect", "method-mid", "method-missing"])
+        self.assertEqual([row["rank"] for row in comparison["rows"]], [1, 2, 3])
+        self.assertTrue(comparison["rows"][0]["best"]["rmse"])
+        self.assertTrue(comparison["rows"][0]["best"]["mae"])
+        self.assertTrue(comparison["rows"][0]["best"]["r2"])
+        self.assertFalse(comparison["rows"][1]["best"]["rmse"])
+
+        by_r2 = self.app.compare_experiment_results("compare-demo", sort_by="r2", sort_order="desc")
+        self.assertEqual(by_r2["rows"][0]["methodId"], "method-perfect")
+        by_rmse_desc = self.app.compare_experiment_results("compare-demo", dataset_ref="meter-a@v1", sort_order="desc")
+        self.assertEqual(by_rmse_desc["rows"][-1]["methodId"], "method-missing")
+
     def test_prediction_result_mape_ignores_near_zero_targets(self):
         import numpy as np
 
@@ -1181,6 +1230,50 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(payload["failed"], 1)
         self.assertEqual(payload["results"][1]["error"], "PREDICTION_ARRAYS_REQUIRED")
         self.assertEqual(len(json.loads(listed.stdout)), 1)
+
+    def test_cli_compares_experiment_results_after_manifest_import(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["PYTHONPATH"] = str(ROOT)
+        best = self.home / "cli-compare-best.npz"
+        worse = self.home / "cli-compare-worse.npz"
+        np.savez(best, y_true=np.array([1.0, 2.0, 3.0]), y_pred=np.array([1.0, 2.0, 3.0]))
+        np.savez(worse, y_true=np.array([1.0, 2.0, 3.0]), y_pred=np.array([2.0, 3.0, 4.0]))
+        manifest = self.home / "cli-compare-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"experimentName": "compare-demo", "methodId": "best", "methodKind": "sequence", "source": best.name},
+                        {"experimentName": "compare-demo", "methodId": "worse", "methodKind": "sequence", "source": worse.name},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [sys.executable, "-m", "cortex.cli", "experiment-result", "import-manifest", "--manifest", str(manifest)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-m", "cortex.cli", "experiment-result", "compare", "--experiment", "compare-demo"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+
+        self.assertEqual([row["methodId"] for row in payload["rows"]], ["best", "worse"])
+        self.assertTrue(payload["rows"][0]["best"]["rmse"])
 
     def test_api_completes_full_loop(self):
         env = os.environ.copy()
@@ -1402,6 +1495,51 @@ class Phase1StoriesTest(unittest.TestCase):
             self.assertEqual(summary["failed"], 1)
             self.assertEqual(summary["results"][1]["error"], "PREDICTION_ARRAYS_REQUIRED")
             self.assertEqual(len(results), 1)
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
+    def test_api_compares_experiment_results_after_manifest_import(self):
+        import numpy as np
+
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8773"
+        env["PYTHONPATH"] = str(ROOT)
+        best = self.home / "api-compare-best.npz"
+        worse = self.home / "api-compare-worse.npz"
+        np.savez(best, y_true=np.array([1.0, 2.0, 3.0]), y_pred=np.array([1.0, 2.0, 3.0]))
+        np.savez(worse, y_true=np.array([1.0, 2.0, 3.0]), y_pred=np.array([2.0, 3.0, 4.0]))
+        manifest = self.home / "api-compare-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"experimentName": "compare-demo", "methodId": "best", "methodKind": "sequence", "source": best.name},
+                        {"experimentName": "compare-demo", "methodId": "worse", "methodKind": "sequence", "source": worse.name},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8773/healthz")
+            self._api_post(
+                "http://127.0.0.1:8773/api/v1/experiment-results:import-manifest",
+                {"manifest": str(manifest), "createdBy": "alice"},
+            )
+            comparison = self._api_get("http://127.0.0.1:8773/api/v1/experiment-results:compare?experimentName=compare-demo")
+
+            self.assertEqual([row["methodId"] for row in comparison["rows"]], ["best", "worse"])
+            self.assertTrue(comparison["rows"][0]["best"]["rmse"])
         finally:
             server.send_signal(signal.SIGINT)
             server.wait(timeout=5)

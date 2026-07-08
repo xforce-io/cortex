@@ -118,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     result_manifest = experiment_result_sub.add_parser("import-manifest")
     result_manifest.add_argument("--manifest", required=True)
     result_manifest.add_argument("--created-by", default="unknown")
+    result_compare = experiment_result_sub.add_parser("compare")
+    result_compare.add_argument("--experiment", required=True)
+    result_compare.add_argument("--dataset-ref", default="")
+    result_compare.add_argument("--method-kind", default="")
+    result_compare.add_argument("--sort-by", default="rmse")
+    result_compare.add_argument("--sort-order", default="asc")
 
     model = sub.add_parser("model")
     model_sub = model.add_subparsers(dest="command", required=True)
@@ -200,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
             print_json(app.import_prediction_result(args.experiment, args.method_id, args.method_kind, args.source, created_by=args.created_by, dataset_ref=args.dataset_ref))
         elif args.group == "experiment-result" and args.command == "import-manifest":
             print_json(app.import_prediction_results_manifest(args.manifest, created_by=args.created_by))
+        elif args.group == "experiment-result" and args.command == "compare":
+            print_json(app.compare_experiment_results(args.experiment, args.dataset_ref, args.method_kind, args.sort_by, args.sort_order))
         elif args.group == "model" and args.command == "register":
             print_json(app.register_model_version(args.name, args.run_id, args.artifact_path, args.description))
         elif args.group == "model" and args.command == "alias" and args.alias_command == "set":
