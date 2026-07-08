@@ -17,6 +17,7 @@ from uuid import uuid4
 from .db import connect, decode_row, dump, load
 from .mlflow_local import LocalMlflow
 from .storage import ObjectStorage
+from . import logging as cortex_logging
 
 
 def now() -> str:
@@ -220,13 +221,16 @@ class CortexApp:
         if existing:
             project_id = f"{project_id}_{uuid4().hex[:6]}"
         ts = now()
-        self.conn.execute(
-            """
-            INSERT INTO projects(id, name, description, owner, team, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (project_id, name, description, owner, team, status, ts, ts),
-        )
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO projects(id, name, description, owner, team, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, name, description, owner, team, status, ts, ts),
+            )
+        except IntegrityError as exc:
+            raise ValueError("PROJECT_NAME_ALREADY_EXISTS") from exc
         self.audit(owner, team, "project.create", "project", project_id, {"name": name})
         self.conn.commit()
         return self.get_project(project_id)
@@ -376,13 +380,16 @@ class CortexApp:
         if existing:
             dataset_id = f"{dataset_id}_{uuid4().hex[:6]}"
         ts = now()
-        self.conn.execute(
-            """
-            INSERT INTO datasets(id, name, description, type, owner, team, tags, visibility, domain, source_system, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (dataset_id, name, description, dataset_type, owner, team, dump(tags or []), visibility, domain, source_system, ts, ts),
-        )
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO datasets(id, name, description, type, owner, team, tags, visibility, domain, source_system, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (dataset_id, name, description, dataset_type, owner, team, dump(tags or []), visibility, domain, source_system, ts, ts),
+            )
+        except IntegrityError as exc:
+            raise ValueError("DATASET_NAME_ALREADY_EXISTS") from exc
         self.audit(owner, team, "dataset.create", "dataset", dataset_id, {"name": name})
         self.conn.commit()
         self.link_project_dataset(project_id or self.get_default_project()["id"], dataset_id, role="train", added_by=owner)
@@ -745,7 +752,7 @@ class CortexApp:
     ) -> dict:
         job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id)
         threading.Thread(target=self._run_job_in_background, args=(job["id"],), daemon=True).start()
-        print(f"training job accepted id={job['id']} template={template_id} dataset={dataset_ref}", file=sys.stderr, flush=True)
+        cortex_logging.info("training job accepted id=%s template=%s dataset=%s", job["id"], template_id, dataset_ref)
         return job
 
     def _run_job_in_background(self, job_id: str) -> None:
@@ -811,7 +818,7 @@ class CortexApp:
 
     def _run_job(self, job_id: str) -> None:
         job = self.get_training_job(job_id)
-        print(f"training job started id={job_id} template={job['templateId']} run={job['mlflowRunId']}", file=sys.stderr, flush=True)
+        cortex_logging.info("training job started id=%s template=%s run=%s", job_id, job["templateId"], job["mlflowRunId"])
         self.conn.execute(
             "UPDATE training_jobs SET status = 'running', progress_percent = 5, status_message = ?, started_at = ?, executor_ref = ? WHERE id = ?",
             ("Starting executor", now(), f"local:{os.getpid()}", job_id),
@@ -834,7 +841,7 @@ class CortexApp:
             )
             self._update_job_progress(job_id, 100, "Completed")
             self.conn.execute("UPDATE training_jobs SET status = 'succeeded', finished_at = ? WHERE id = ?", (now(), job_id))
-            print(f"training job succeeded id={job_id} metrics={json.dumps(metrics, sort_keys=True)}", file=sys.stderr, flush=True)
+            cortex_logging.info("training job succeeded id=%s metrics=%s", job_id, json.dumps(metrics, sort_keys=True))
         except Exception as exc:
             previous_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
             log_path.write_text(previous_log + "\n" + traceback.format_exc(), encoding="utf-8")
@@ -843,7 +850,7 @@ class CortexApp:
                 "UPDATE training_jobs SET status = 'failed', progress_percent = 100, status_message = ?, error_message = ?, finished_at = ? WHERE id = ?",
                 ("Failed", str(exc), now(), job_id),
             )
-            print(f"training job failed id={job_id} error={exc}", file=sys.stderr, flush=True)
+            cortex_logging.error("training job failed id=%s error=%s", job_id, exc)
         self.conn.commit()
 
     def _execute_template(self, job: dict, version: dict, log_path: Path) -> dict:

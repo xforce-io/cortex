@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .app import CortexApp
+from . import logging as cortex_logging
+from sqlite3 import IntegrityError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,10 +133,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling GET %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_POST(self) -> None:
         try:
@@ -261,12 +264,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except KeyError as exc:
+            cortex_logging.debug("Missing required field: %s", exc.args[0])
             self._json(422, {"error": f"MISSING_FIELD:{exc.args[0]}"})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling POST %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_PATCH(self) -> None:
         try:
@@ -278,10 +283,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling PATCH %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_DELETE(self) -> None:
         try:
@@ -296,10 +302,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling DELETE %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def log_message(self, fmt, *args):
         return
@@ -310,7 +317,7 @@ def main() -> None:
     port = int(os.environ.get("CORTEX_PORT", "8768"))
     Handler.app = CortexApp.open()
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"cortex api listening on http://{host}:{port}", flush=True)
+    cortex_logging.info("cortex api listening on http://%s:%s", host, port)
     server.serve_forever()
 
 

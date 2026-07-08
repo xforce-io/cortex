@@ -148,3 +148,30 @@ The compose validation test requires Docker:
 docker compose -f deploy/docker-compose.yml config
 docker compose -f deploy/docker-compose.yml up --build
 ```
+
+## Architecture Notes
+
+### SQLite Thread Safety
+
+Cortex uses SQLite with `check_same_thread=False` and WAL mode (Write-Ahead Logging) enabled. This configuration is intentional for this local prototype:
+
+- **WAL mode** enables concurrent readers while a writer is active
+- **`check_same_thread=False`** allows the same connection to be shared across threads, which simplifies the implementation for a local development tool
+
+This configuration is well-suited for:
+- Single-user local development
+- Low-to-moderate concurrency workloads
+- Prototyping and experimentation
+
+For production multi-user deployments, consider:
+- Using a dedicated connection pool
+- Switching to PostgreSQL/MySQL (see `deploy/docker-compose.yml` for an example architecture)
+- Implementing proper database connection management
+
+### Error Handling
+
+API errors follow these conventions:
+- `400 Bad Request` - ValueError (client input errors)
+- `422 Unprocessable Entity` - Missing required fields (KeyError)
+- `500 Internal Server Error` - Generic server errors, no sensitive details exposed
+- All errors are logged server-side with full context via the `cortex.logging` module
