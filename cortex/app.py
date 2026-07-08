@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import logging as cortex_logging
 from .db import connect, decode_row, dump, load
 from .executors import ExecutionResult, TrainingContext, builtin_executor_registry
+from .executors.provenance import executor_provenance_for, flatten_executor_provenance
 from .mlflow_local import LocalMlflow
 from .storage import ObjectStorage
 
@@ -113,6 +114,7 @@ def public_job(row: dict) -> dict:
         "status": row["status"],
         "mlflowRunId": row["mlflow_run_id"],
         "executorRef": row["executor_ref"],
+        "executorProvenance": load(row.get("executor_provenance") or "{}"),
         "logUri": row["log_uri"],
         "errorMessage": row["error_message"],
         "progressPercent": progress,
@@ -861,6 +863,9 @@ class CortexApp:
         executor = self.executor_registry.get(job["templateId"])
         if not executor:
             raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
+        provenance = executor_provenance_for(executor, now())
+        self.conn.execute("UPDATE training_jobs SET executor_provenance = ? WHERE id = ?", (dump(provenance), job["id"]))
+        self.mlflow.update_run(job["mlflowRunId"], tags=flatten_executor_provenance(provenance))
         work_dir = self.home / "jobs" / job["id"]
         context = TrainingContext(
             app=self,
@@ -874,6 +879,7 @@ class CortexApp:
         )
         result = executor.run(context)
         model_file = work_dir / "model.json"
+        result.model_payload["executorProvenance"] = provenance
         result.model_payload["metrics"] = result.metrics
         model_file.write_text(json.dumps(result.model_payload), encoding="utf-8")
         self.mlflow.log_artifact(job["mlflowRunId"], model_file, "model/model.json")
