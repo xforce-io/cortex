@@ -14,10 +14,11 @@ from pathlib import Path
 from sqlite3 import IntegrityError
 from uuid import uuid4
 
+from . import logging as cortex_logging
 from .db import connect, decode_row, dump, load
+from .executors import ArtifactSpec, ExecutionResult, TrainingContext, builtin_executor_registry
 from .mlflow_local import LocalMlflow
 from .storage import ObjectStorage
-from . import logging as cortex_logging
 
 
 def now() -> str:
@@ -154,9 +155,6 @@ def public_experiment_result(row: dict) -> dict:
     }
 
 
-EXECUTABLE_TEMPLATES = {"sklearn-kmeans", "sklearn-regressor", "statsmodels-mstl", "pytorch-sequence-forecast"}
-
-
 class CortexApp:
     def __init__(self, home: Path):
         self.home = home
@@ -164,6 +162,7 @@ class CortexApp:
         self.conn = connect(self.home / "cortex.sqlite3")
         self.storage = ObjectStorage(self.home / "objects")
         self.mlflow = LocalMlflow(self.conn, self.home / "mlruns")
+        self.executor_registry = builtin_executor_registry()
         (self.home / "jobs").mkdir(exist_ok=True)
         self.ensure_default_project()
 
@@ -719,7 +718,7 @@ class CortexApp:
                 "modelType": row["model_type"],
                 "datasetTypes": load(row["dataset_types"]),
                 "paramSchema": load(row["param_schema"]),
-                "executorStatus": "available" if row["id"] in EXECUTABLE_TEMPLATES else "not_implemented",
+                "executorStatus": self.executor_registry.status_for(row["id"]),
                 "enabled": bool(row["enabled"]),
             }
             for row in rows
@@ -830,7 +829,9 @@ class CortexApp:
             version = public_version(version_row)
             if self.storage.checksum(version["storageUri"], version["format"]) != version["checksum"]:
                 raise ValueError("CHECKSUM_MISMATCH")
-            metrics = self._execute_template(job, version, log_path)
+            dataset = self.get_dataset(version["datasetId"])
+            result = self._execute_template(job, dataset, version, log_path)
+            metrics = result.metrics
             dataset_ref = f"{version['datasetId']}@{version['version']}"
             self.mlflow.update_run(
                 job["mlflowRunId"],
@@ -853,10 +854,36 @@ class CortexApp:
             cortex_logging.error("training job failed id=%s error=%s", job_id, exc)
         self.conn.commit()
 
-    def _execute_template(self, job: dict, version: dict, log_path: Path) -> dict:
+    def _execute_template(self, job: dict, dataset: dict, version: dict, log_path: Path) -> ExecutionResult:
         def progress(percent: int, message: str) -> None:
             self._update_job_progress(job["id"], percent, message)
 
+        executor = self.executor_registry.get(job["templateId"])
+        if not executor:
+            raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
+        work_dir = self.home / "jobs" / job["id"]
+        context = TrainingContext(
+            app=self,
+            job=job,
+            dataset=dataset,
+            version=version,
+            params=job["params"],
+            work_dir=work_dir,
+            log_path=log_path,
+            progress=progress,
+        )
+        result = executor.run(context)
+        model_file = work_dir / "model.json"
+        result.model_payload["metrics"] = result.metrics
+        model_file.write_text(json.dumps(result.model_payload), encoding="utf-8")
+        self.mlflow.log_artifact(job["mlflowRunId"], model_file, "model/model.json")
+        for artifact in result.artifacts:
+            self.mlflow.log_artifact(job["mlflowRunId"], artifact.source, artifact.target)
+        log_text = result.log_text or f"job {job['id']} completed\nmetrics={json.dumps(result.metrics, sort_keys=True)}\n"
+        log_path.write_text(log_text, encoding="utf-8")
+        return result
+
+    def _execute_legacy_template(self, job: dict, version: dict, progress) -> ExecutionResult:
         progress(10, "Reading dataset")
         rows = self._read_csv_numeric(version["storageUri"])
         if not rows:
@@ -867,7 +894,7 @@ class CortexApp:
         progress(25, f"Prepared {len(rows)} rows")
         values = [[float(row[col]) for col in numeric_cols] for row in rows]
         model_payload = {"templateId": job["templateId"], "params": job["params"], "numericColumns": numeric_cols}
-        extra_artifacts = []
+        extra_artifacts: list[ArtifactSpec] = []
         if job["templateId"] == "sklearn-kmeans":
             k = int(job["params"].get("n_clusters", 2))
             min_duration = float(version.get("split", {}).get("minTrainingSeconds", job["params"].get("_min_duration_seconds", 0)) or 0)
@@ -905,7 +932,7 @@ class CortexApp:
             progress(30, "Preparing sequence windows")
             metrics, sequence_payload, weights_file = self._train_sequence_forecast(job, version, rows, progress)
             model_payload.update(sequence_payload)
-            extra_artifacts.append((weights_file, "model/model.pt"))
+            extra_artifacts.append(ArtifactSpec(weights_file, "model/model.pt"))
             progress(95, "Computed sequence metrics")
         elif job["templateId"] == "statsmodels-mstl":
             progress(30, "Preparing MSTL series")
@@ -946,14 +973,7 @@ class CortexApp:
             progress(95, "Computed MSTL metrics")
         else:
             raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
-        model_file = self.home / "jobs" / job["id"] / "model.json"
-        model_payload["metrics"] = metrics
-        model_file.write_text(json.dumps(model_payload), encoding="utf-8")
-        self.mlflow.log_artifact(job["mlflowRunId"], model_file, "model/model.json")
-        for source, target in extra_artifacts:
-            self.mlflow.log_artifact(job["mlflowRunId"], source, target)
-        log_path.write_text(f"job {job['id']} completed\nmetrics={json.dumps(metrics, sort_keys=True)}\n", encoding="utf-8")
-        return metrics
+        return ExecutionResult(metrics=metrics, model_payload=model_payload, artifacts=extra_artifacts)
 
     def _update_job_progress(self, job_id: str, percent: int, message: str) -> None:
         self.conn.execute(
