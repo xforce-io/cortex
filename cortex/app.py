@@ -927,7 +927,6 @@ class CortexApp:
             raise ValueError("DATASET_EMPTY")
         import numpy as np
         import torch
-        from torch import nn
 
         params = job["params"]
         time_column = str(params.get("time_column", "")).strip()
@@ -988,24 +987,14 @@ class CortexApp:
         x_validation = (x_validation - feature_mean) / feature_std
         y_train_scaled = (y_train - target_mean) / target_std
 
-        class SequenceRegressor(nn.Module):
-            def __init__(self, input_size: int, hidden_size: int):
-                super().__init__()
-                self.encoder = nn.LSTM(input_size=input_size, hidden_size=hidden_size, batch_first=True)
-                self.head = nn.Linear(hidden_size, 1)
-
-            def forward(self, values):
-                _, (hidden, _) = self.encoder(values)
-                return self.head(hidden[-1])
-
-        model = SequenceRegressor(len(feature_columns), hidden_size)
+        model = self._build_sequence_regressor(len(feature_columns), hidden_size)
         warm_start_model = str(params.get("warm_start_model", "")).strip()
         if warm_start_model:
             self._load_sequence_warm_start(model, warm_start_model, len(feature_columns), hidden_size, window, horizon)
 
         progress(55, "Training sequence model")
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        loss_fn = nn.MSELoss()
+        loss_fn = torch.nn.MSELoss()
         x_tensor = torch.tensor(x_train, dtype=torch.float32)
         y_tensor = torch.tensor(y_train_scaled, dtype=torch.float32)
         model.train()
@@ -1079,6 +1068,24 @@ class CortexApp:
         if value <= 0:
             raise ValueError(error_code)
         return value
+
+    def _build_sequence_regressor(self, input_size: int, hidden_size: int):
+        from torch import nn
+        module = nn.Module
+        lstm = nn.LSTM
+        linear = nn.Linear
+
+        class SequenceRegressor(module):
+            def __init__(self, input_size: int, hidden_size: int):
+                super().__init__()
+                self.encoder = lstm(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+                self.head = linear(hidden_size, 1)
+
+            def forward(self, values):
+                _, (hidden, _) = self.encoder(values)
+                return self.head(hidden[-1])
+
+        return SequenceRegressor(input_size, hidden_size)
 
     def _sequence_samples(
         self,
@@ -1643,6 +1650,8 @@ class CortexApp:
             metrics["test_rows"] = len(targets)
             if group_column:
                 metrics["test_groups"] = len(series_info["groups"])
+        elif payload.get("modelKind") == "sequence_forecast":
+            metrics = self._evaluate_sequence_forecast(model_path.parent, payload, rows)
         else:
             raise ValueError("MODEL_NOT_EVALUABLE")
         train_ref = self.get_run(model["run_id"])["tags"].get("dataset_version", "")
@@ -1659,6 +1668,99 @@ class CortexApp:
         self.audit(owner, team, "model.evaluate", "evaluation", evaluation_id, {"model": name, "version": version, "testDatasetRef": test_dataset_ref})
         self.conn.commit()
         return self.get_evaluation(evaluation_id)
+
+    def _evaluate_sequence_forecast(self, artifact_dir: Path, payload: dict, rows: list[dict]) -> dict:
+        if not importlib.util.find_spec("torch"):
+            raise ValueError("PYTORCH_NOT_AVAILABLE")
+        if not importlib.util.find_spec("numpy"):
+            raise ValueError("NUMPY_NOT_AVAILABLE")
+        if not rows:
+            raise ValueError("DATASET_EMPTY")
+        import numpy as np
+        import torch
+
+        time_column = str(payload.get("timeColumn", "")).strip()
+        target_column = str(payload.get("targetColumn", "")).strip()
+        group_column = str(payload.get("groupColumn", "")).strip()
+        feature_columns = [str(column) for column in payload.get("featureColumns", [])]
+        window = int(payload.get("window", 0))
+        horizon = int(payload.get("horizon", 0))
+        hidden_size = int(payload.get("hiddenSize", 0))
+        normalization = payload.get("normalization", {})
+
+        if not time_column:
+            raise ValueError("SEQUENCE_TIME_COLUMN_REQUIRED")
+        if not target_column:
+            raise ValueError("SEQUENCE_TARGET_COLUMN_REQUIRED")
+        if not feature_columns:
+            raise ValueError("SEQUENCE_FEATURES_REQUIRED")
+        if window <= 0:
+            raise ValueError("SEQUENCE_INVALID_WINDOW")
+        if horizon <= 0:
+            raise ValueError("SEQUENCE_INVALID_HORIZON")
+        if hidden_size <= 0:
+            raise ValueError("SEQUENCE_INVALID_HIDDEN_SIZE")
+        if time_column not in rows[0]:
+            raise ValueError("SEQUENCE_TIME_COLUMN_NOT_FOUND")
+        if target_column not in rows[0]:
+            raise ValueError("SEQUENCE_TARGET_COLUMN_NOT_FOUND")
+        if group_column and group_column not in rows[0]:
+            raise ValueError("SEQUENCE_GROUP_COLUMN_NOT_FOUND")
+        if not isinstance(rows[0][target_column], (int, float)):
+            raise ValueError("SEQUENCE_TARGET_MUST_BE_NUMERIC")
+        for column in feature_columns:
+            if column not in rows[0]:
+                raise ValueError("SEQUENCE_FEATURE_COLUMN_NOT_FOUND")
+            if not isinstance(rows[0][column], (int, float)):
+                raise ValueError("SEQUENCE_FEATURE_MUST_BE_NUMERIC")
+
+        samples = self._sequence_samples(rows, time_column, target_column, group_column, feature_columns, window, horizon)
+        if not samples:
+            raise ValueError("MODEL_NOT_EVALUABLE")
+
+        weights = artifact_dir / "model.pt"
+        if not weights.exists():
+            raise ValueError("MODEL_ARTIFACT_NOT_FOUND")
+        try:
+            checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(weights, map_location="cpu")
+        if (
+            checkpoint.get("input_size") != len(feature_columns)
+            or checkpoint.get("hidden_size") != hidden_size
+            or checkpoint.get("window") != window
+            or checkpoint.get("horizon") != horizon
+        ):
+            raise ValueError("SEQUENCE_MODEL_ARTIFACT_INCOMPATIBLE")
+
+        try:
+            feature_mean = np.array(normalization["featureMean"], dtype=np.float32).reshape(1, 1, -1)
+            feature_std = np.array(normalization["featureStd"], dtype=np.float32).reshape(1, 1, -1)
+            target_mean = float(normalization["targetMean"])
+            target_std = float(normalization["targetStd"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("SEQUENCE_MODEL_ARTIFACT_INCOMPATIBLE") from exc
+        if feature_mean.shape[-1] != len(feature_columns) or feature_std.shape[-1] != len(feature_columns) or target_std == 0:
+            raise ValueError("SEQUENCE_MODEL_ARTIFACT_INCOMPATIBLE")
+        feature_std[feature_std == 0] = 1.0
+
+        x_values = np.array([sample[0] for sample in samples], dtype=np.float32)
+        targets = [float(sample[1]) for sample in samples]
+        x_values = (x_values - feature_mean) / feature_std
+        model = self._build_sequence_regressor(len(feature_columns), hidden_size)
+        try:
+            model.load_state_dict(checkpoint["state_dict"])
+        except Exception as exc:
+            raise ValueError("SEQUENCE_MODEL_ARTIFACT_INCOMPATIBLE") from exc
+        model.eval()
+        with torch.no_grad():
+            prediction_scaled = model(torch.tensor(x_values, dtype=torch.float32)).numpy()
+        predictions = (prediction_scaled * target_std + target_mean).reshape(-1).astype(float).tolist()
+        metrics = {f"test_{key}": value for key, value in self._regression_metrics(targets, predictions).items()}
+        metrics["test_rows"] = len(targets)
+        if group_column:
+            metrics["test_groups"] = len({sample[2] for sample in samples})
+        return metrics
 
     def get_evaluation(self, evaluation_id: str) -> dict:
         row = decode_row(self.conn.execute("SELECT * FROM evaluations WHERE id = ?", (evaluation_id,)).fetchone())
