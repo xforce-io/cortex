@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from . import logging as cortex_logging
 from .db import connect, decode_row, dump, load
-from .executors import ArtifactSpec, ExecutionResult, TrainingContext, builtin_executor_registry
+from .executors import ExecutionResult, TrainingContext, builtin_executor_registry
 from .mlflow_local import LocalMlflow
 from .storage import ObjectStorage
 
@@ -882,98 +882,6 @@ class CortexApp:
         log_text = result.log_text or f"job {job['id']} completed\nmetrics={json.dumps(result.metrics, sort_keys=True)}\n"
         log_path.write_text(log_text, encoding="utf-8")
         return result
-
-    def _execute_legacy_template(self, job: dict, version: dict, progress) -> ExecutionResult:
-        progress(10, "Reading dataset")
-        rows = self._read_csv_numeric(version["storageUri"])
-        if not rows:
-            raise ValueError("DATASET_EMPTY")
-        numeric_cols = [key for key in rows[0] if isinstance(rows[0][key], (int, float))]
-        if not numeric_cols:
-            raise ValueError("NO_NUMERIC_COLUMNS")
-        progress(25, f"Prepared {len(rows)} rows")
-        values = [[float(row[col]) for col in numeric_cols] for row in rows]
-        model_payload = {"templateId": job["templateId"], "params": job["params"], "numericColumns": numeric_cols}
-        extra_artifacts: list[ArtifactSpec] = []
-        if job["templateId"] == "sklearn-kmeans":
-            k = int(job["params"].get("n_clusters", 2))
-            min_duration = float(version.get("split", {}).get("minTrainingSeconds", job["params"].get("_min_duration_seconds", 0)) or 0)
-            centers, inertia = self._simple_kmeans(values, k, progress, min_duration)
-            model_payload["modelKind"] = "kmeans"
-            model_payload["centers"] = centers
-            metrics = {"inertia": round(inertia, 6), "rows": len(values)}
-        elif job["templateId"] == "sklearn-regressor":
-            target = str(job["params"].get("target", "")).strip()
-            if not target:
-                raise ValueError("TARGET_REQUIRED")
-            if target not in rows[0]:
-                raise ValueError("TARGET_COLUMN_NOT_FOUND")
-            if target not in numeric_cols:
-                raise ValueError("TARGET_MUST_BE_NUMERIC")
-            feature_cols = [col for col in numeric_cols if col != target]
-            if not feature_cols:
-                raise ValueError("NO_NUMERIC_FEATURE_COLUMNS")
-            progress(45, "Fitting linear regressor")
-            coefficients, intercept = self._fit_linear_regression([[float(row[col]) for col in feature_cols] for row in rows], [float(row[target]) for row in rows])
-            predictions = [intercept + sum(coefficients[i] * float(row[col]) for i, col in enumerate(feature_cols)) for row in rows]
-            metrics = self._regression_metrics([float(row[target]) for row in rows], predictions)
-            metrics["rows"] = len(rows)
-            model_payload.update(
-                {
-                    "modelKind": "linear_regression",
-                    "target": target,
-                    "featureColumns": feature_cols,
-                    "coefficients": coefficients,
-                    "intercept": intercept,
-                }
-            )
-            progress(90, "Computed regression metrics")
-        elif job["templateId"] == "pytorch-sequence-forecast":
-            progress(30, "Preparing sequence windows")
-            metrics, sequence_payload, weights_file = self._train_sequence_forecast(job, version, rows, progress)
-            model_payload.update(sequence_payload)
-            extra_artifacts.append(ArtifactSpec(weights_file, "model/model.pt"))
-            progress(95, "Computed sequence metrics")
-        elif job["templateId"] == "statsmodels-mstl":
-            progress(30, "Preparing MSTL series")
-            trend = str(job["params"].get("trend", "additive"))
-            max_iter = int(job["params"].get("max_iter", 100))
-            value_column = str(job["params"].get("value_column", "")).strip()
-            if value_column == "":
-                value_column = None
-            time_column = str(job["params"].get("time_column", "")).strip() or None
-            group_column = str(job["params"].get("group_column", "")).strip() or None
-            periods = self._parse_mstl_periods(job["params"].get("periods"))
-            targets, predictions, series_info = self._mstl_targets_predictions(
-                rows,
-                value_column=value_column,
-                time_column=time_column,
-                group_column=group_column,
-                periods=periods,
-                trend=trend,
-                max_iter=max_iter,
-            )
-            metrics = self._regression_metrics(targets, predictions)
-            metrics["rows"] = len(targets)
-            metrics["periods_count"] = len(periods)
-            if group_column:
-                metrics["groups"] = len(series_info["groups"])
-            model_payload.update(
-                {
-                    "modelKind": "mstl",
-                    "valueColumn": value_column or series_info["valueColumn"],
-                    "timeColumn": time_column or "",
-                    "groupColumn": group_column or "",
-                    "periods": periods,
-                    "trend": trend,
-                    "maxIter": max_iter,
-                    "seriesInfo": series_info,
-                }
-            )
-            progress(95, "Computed MSTL metrics")
-        else:
-            raise ValueError(f"TEMPLATE_EXECUTOR_NOT_IMPLEMENTED:{job['templateId']}")
-        return ExecutionResult(metrics=metrics, model_payload=model_payload, artifacts=extra_artifacts)
 
     def _update_job_progress(self, job_id: str, percent: int, message: str) -> None:
         self.conn.execute(
