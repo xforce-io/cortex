@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .app import CortexApp
+from . import logging as cortex_logging
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +16,27 @@ WEB_ROOT = ROOT / "web"
 
 
 class Handler(BaseHTTPRequestHandler):
-    app = None
+    app_factory = staticmethod(CortexApp.open)
+
+    def __init__(self, *args, **kwargs):
+        self._app: CortexApp | None = None
+        super().__init__(*args, **kwargs)
+
+    @property
+    def app(self) -> CortexApp:
+        if self._app is None:
+            self._app = type(self).app_factory()
+        return self._app
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if self._app is not None:
+                conn = getattr(self._app, "conn", None)
+                if conn is not None:
+                    conn.close()
+                self._app = None
 
     def _json(self, status: int, payload) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -131,10 +151,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling GET %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_POST(self) -> None:
         try:
@@ -261,12 +282,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except KeyError as exc:
+            cortex_logging.debug("Missing required field: %s", exc.args[0])
             self._json(422, {"error": f"MISSING_FIELD:{exc.args[0]}"})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling POST %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_PATCH(self) -> None:
         try:
@@ -278,10 +301,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling PATCH %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def do_DELETE(self) -> None:
         try:
@@ -296,10 +320,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "NOT_FOUND"})
         except ValueError as exc:
+            cortex_logging.debug("Client error: %s", exc)
             self._json(400, {"error": str(exc)})
         except Exception as exc:
-            traceback.print_exc()
-            self._json(500, {"error": str(exc) or exc.__class__.__name__})
+            cortex_logging.exception("Unexpected error handling DELETE %s", self.path)
+            self._json(500, {"error": "INTERNAL_SERVER_ERROR"})
 
     def log_message(self, fmt, *args):
         return
@@ -307,10 +332,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     host = os.environ.get("CORTEX_HOST", "0.0.0.0")
-    port = int(os.environ.get("CORTEX_PORT", "8000"))
-    Handler.app = CortexApp.open()
+    port = int(os.environ.get("CORTEX_PORT", "8768"))
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"cortex api listening on http://{host}:{port}", flush=True)
+    cortex_logging.info("cortex api listening on http://%s:%s", host, port)
     server.serve_forever()
 
 
