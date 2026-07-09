@@ -534,7 +534,7 @@ from cortex.executors import ExecutionResult
 
 class Preflight:
     def run(self, context):
-        if context.runtime_target["id"] != "gpu-3090":
+        if context.runtime_target["id"] != "remote-gpu":
             raise ValueError("TEST_RUNTIME_TARGET_NOT_PROPAGATED")
         context.params["target_kind"] = context.runtime_target["kind"]
 
@@ -581,19 +581,43 @@ class Executor:
                     "alice",
                     "ml",
                     wait=True,
-                    runtime_target="gpu-3090",
+                    runtime_target={"id": "remote-gpu", "kind": "ssh", "host": "runtime.example.internal", "capabilities": ["gpu"]},
                 )
                 model_payload = json.loads((app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
 
                 self.assertEqual(job["status"], "succeeded")
-                self.assertEqual(job["runtimeTarget"]["id"], "gpu-3090")
+                self.assertEqual(job["runtimeTarget"]["id"], "remote-gpu")
                 self.assertEqual(job["runtimeTarget"]["kind"], "ssh")
+                self.assertEqual(job["runtimeTarget"]["host"], "runtime.example.internal")
                 self.assertTrue(job["runtimeTarget"]["explicit"])
                 self.assertIn("gpu", job["runtimeTarget"]["capabilities"])
                 self.assertEqual(model_payload["targetKind"], "ssh")
                 run = app.get_run(job["mlflowRunId"])
-                self.assertEqual(run["tags"]["runtime_target"], "gpu-3090")
+                self.assertEqual(run["tags"]["runtime_target"], "remote-gpu")
                 self.assertEqual(run["tags"]["runtime_target_kind"], "ssh")
+            finally:
+                app.conn.close()
+
+    def test_unconfigured_runtime_target_string_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = CortexApp.open(Path(tmp))
+            try:
+                source = Path(tmp) / "train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/runtime-unconfigured/v1/train.csv", source)
+                dataset = app.create_dataset("runtime-unconfigured", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/runtime-unconfigured/v1/train.csv", "csv", created_by="alice")
+
+                with self.assertRaisesRegex(ValueError, "RUNTIME_TARGET_NOT_CONFIGURED:unconfigured-remote"):
+                    app.create_training_job(
+                        "sklearn-kmeans",
+                        f"{dataset['id']}@{version['version']}",
+                        "demo/runtime-unconfigured",
+                        {},
+                        "alice",
+                        "ml",
+                        runtime_target="unconfigured-remote",
+                    )
             finally:
                 app.conn.close()
 
