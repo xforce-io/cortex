@@ -142,6 +142,15 @@ python -m pytest tests/test_phase1_stories.py -q
 
 The suite covers dataset registration, executable template filtering, KMeans training, regression training, bad regression target handling, job progress, model registration, alias audit, evaluation, API flow, and static web console assets.
 
+The Guangyuan external executor smoke test is a cross-repository integration check. It expects the sibling `ai-capability` repository and a Python 3.10 environment with the Guangyuan training dependencies installed:
+
+```bash
+python scripts/verify_guangyuan_smoke.py \
+  --ai-capability-repo /Users/xupeng/dev/tiansu/ai-capability
+```
+
+It verifies the Cortex lifecycle for `guangyuan-lstm-trainer`: external template loading, training job completion, `pred_result.npz` artifact collection, experiment result import, and compare output.
+
 The compose validation test requires Docker:
 
 ```bash
