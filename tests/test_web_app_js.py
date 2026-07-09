@@ -180,6 +180,38 @@ assert.doesNotMatch(elementFor("#jobDetail").innerHTML, /data-jump-dataset-versi
 """
         )
 
+    def test_runbook_view_renders_list_detail_and_markdown(self):
+        self.run_app_script(
+            r"""
+state.runbooks.items = [
+  {
+    id: "14-guangyuan-reproduction",
+    title: "Guangyuan Reproduction Runbook",
+    path: "docs/runbooks/14-guangyuan-reproduction.md",
+    summary: "This runbook is the Cortex-side operating entrypoint.",
+    sections: ["Smoke reproduction", "Full preflight", "Runtime target and resource guard"],
+    updatedAt: "2026-07-09T00:00:00Z",
+  },
+];
+state.runbooks.selectedId = "14-guangyuan-reproduction";
+state.runbooks.details["14-guangyuan-reproduction"] = {
+  ...state.runbooks.items[0],
+  content: "# Guangyuan Reproduction Runbook\n\n## Smoke reproduction\n\nUse `scripts/verify_guangyuan_smoke.py`.\n\n```text\nGUANGYUAN_RUNTIME_TARGET_REQUIRED\n```\n",
+};
+
+renderRunbooks();
+
+assert.match(elementFor("#runbookCount").textContent, /1/);
+assert.match(elementFor("#runbooksBody").innerHTML, /Guangyuan Reproduction Runbook/);
+assert.match(elementFor("#runbookDetail").innerHTML, /docs\/runbooks\/14-guangyuan-reproduction\.md/);
+assert.match(elementFor("#runbookDetail").innerHTML, /Smoke reproduction/);
+assert.match(elementFor("#runbookDetail").innerHTML, /GUANGYUAN_RUNTIME_TARGET_REQUIRED/);
+assert.match(renderMarkdown("# Title\n\n- one\n\n```text\ncode\n```"), /<h1>Title<\/h1>/);
+assert.match(renderMarkdown("# Title\n\n- one\n\n```text\ncode\n```"), /<li>one<\/li>/);
+assert.match(renderMarkdown("# Title\n\n- one\n\n```text\ncode\n```"), /<pre class="detail-json"><code>code/);
+"""
+        )
+
     def test_dataset_detail_surfaces_version_preview_and_project_unlink_scope(self):
         self.run_app_script(
             r"""
