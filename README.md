@@ -149,7 +149,9 @@ python scripts/verify_guangyuan_smoke.py \
   --ai-capability-repo /Users/xupeng/dev/tiansu/ai-capability
 ```
 
-It verifies the Cortex lifecycle for `guangyuan-lstm-trainer`: external template loading, training job completion, `pred_result.npz` artifact collection, experiment result import, and compare output.
+It verifies the Cortex lifecycle for `guangyuan-lstm-trainer`: external template loading,
+external preflight execution, training job completion, `pred_result.npz` artifact
+collection, experiment result import, and compare output.
 
 The compose validation test requires Docker:
 

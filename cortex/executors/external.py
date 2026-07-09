@@ -25,6 +25,7 @@ class CapabilityExecutorSpec:
     dataset_types: list[str]
     param_schema: dict[str, Any]
     entrypoint: str
+    preflight_entrypoint: str | None
     repo_path: Path
     capability_root: Path
     manifest_path: Path
@@ -40,9 +41,10 @@ class CapabilityExecutorSpec:
 
 
 class CapabilityExecutorWrapper:
-    def __init__(self, spec: CapabilityExecutorSpec, executor: Any):
+    def __init__(self, spec: CapabilityExecutorSpec, executor: Any, preflight: Any | None = None):
         self.spec = spec
         self.executor = executor
+        self.preflight = preflight
         self.template_id = spec.template_id
         self.name = spec.name
         self.model_type = spec.model_type
@@ -62,6 +64,8 @@ class CapabilityExecutorWrapper:
         }
 
     def run(self, context):
+        if self.preflight is not None:
+            self.preflight.run(context)
         result = self.executor.run(context)
         dataset_ref = f"{context.version['datasetId']}@{context.version['version']}"
         for artifact in self.spec.artifacts:
