@@ -1800,7 +1800,7 @@ class Phase1StoriesTest(unittest.TestCase):
             self.assertIn("GUANGYUAN_RUNTIME_TARGET_REQUIRED", detail["content"])
             self.assertIn('data-view="runbooks"', index)
             self.assertIn('id="runbookDetail"', index)
-            self.assertIn("复现", index)
+            self.assertIn("Runbooks", index)
             self.assertIn("renderRunbooks", app_js)
         finally:
             server.send_signal(signal.SIGINT)
