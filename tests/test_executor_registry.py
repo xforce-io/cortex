@@ -501,6 +501,102 @@ class Executor:
             finally:
                 app.conn.close()
 
+    def test_runtime_target_is_recorded_and_visible_to_external_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "runtime-target-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: runtime-target-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: runtime-target-executor
+    name: Runtime Target Executor
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    preflight:
+      entrypoint: python:src.executor:Preflight
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Preflight:
+    def run(self, context):
+        if context.runtime_target["id"] != "gpu-3090":
+            raise ValueError("TEST_RUNTIME_TARGET_NOT_PROPAGATED")
+        context.params["target_kind"] = context.runtime_target["kind"]
+
+
+class Executor:
+    def run(self, context):
+        return ExecutionResult(
+            metrics={"rows": 1},
+            model_payload={
+                "modelKind": "runtime_target",
+                "targetKind": context.params["target_kind"],
+            },
+        )
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "runtime-target"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "runtime-target-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/runtime-target/v1/train.csv", source)
+                dataset = app.create_dataset("runtime-target", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/runtime-target/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "runtime-target-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/runtime-target",
+                    {},
+                    "alice",
+                    "ml",
+                    wait=True,
+                    runtime_target="gpu-3090",
+                )
+                model_payload = json.loads((app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
+
+                self.assertEqual(job["status"], "succeeded")
+                self.assertEqual(job["runtimeTarget"]["id"], "gpu-3090")
+                self.assertEqual(job["runtimeTarget"]["kind"], "ssh")
+                self.assertTrue(job["runtimeTarget"]["explicit"])
+                self.assertIn("gpu", job["runtimeTarget"]["capabilities"])
+                self.assertEqual(model_payload["targetKind"], "ssh")
+                run = app.get_run(job["mlflowRunId"])
+                self.assertEqual(run["tags"]["runtime_target"], "gpu-3090")
+                self.assertEqual(run["tags"]["runtime_target_kind"], "ssh")
+            finally:
+                app.conn.close()
+
     def test_external_executor_preflight_failure_blocks_executor(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

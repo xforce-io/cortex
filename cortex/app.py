@@ -20,6 +20,7 @@ from .executors import ExecutionResult, TrainingContext, builtin_executor_regist
 from .executors.capability_loader import capability_repo_paths, load_capability_repositories
 from .executors.provenance import executor_provenance_for, flatten_executor_provenance
 from .mlflow_local import LocalMlflow
+from .runtime_targets import resolve_runtime_target
 from .storage import ObjectStorage
 
 
@@ -116,6 +117,7 @@ def public_job(row: dict) -> dict:
         "mlflowRunId": row["mlflow_run_id"],
         "executorRef": row["executor_ref"],
         "executorProvenance": load(row.get("executor_provenance") or "{}"),
+        "runtimeTarget": load(row.get("runtime_target") or "{}"),
         "logUri": row["log_uri"],
         "errorMessage": row["error_message"],
         "progressPercent": progress,
@@ -746,8 +748,9 @@ class CortexApp:
         team: str,
         wait: bool = False,
         project_id: str | None = None,
+        runtime_target: str | dict | None = None,
     ) -> dict:
-        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id)
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id, runtime_target=runtime_target)
         self._run_job(job["id"])
         return self.get_training_job(job["id"])
 
@@ -760,8 +763,9 @@ class CortexApp:
         owner: str,
         team: str,
         project_id: str | None = None,
+        runtime_target: str | dict | None = None,
     ) -> dict:
-        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id)
+        job = self.create_training_job(template_id, dataset_ref, experiment_name, params, owner, team, project_id=project_id, runtime_target=runtime_target)
         threading.Thread(target=self._run_job_in_background, args=(job["id"],), daemon=True).start()
         cortex_logging.info("training job accepted id=%s template=%s dataset=%s", job["id"], template_id, dataset_ref)
         return job
@@ -778,6 +782,7 @@ class CortexApp:
         owner: str,
         team: str,
         project_id: str | None = None,
+        runtime_target: str | dict | None = None,
     ) -> dict:
         template = self.conn.execute("SELECT * FROM training_templates WHERE id = ? AND enabled = 1", (template_id,)).fetchone()
         if not template:
@@ -792,10 +797,13 @@ class CortexApp:
             raise ValueError("DATASET_ARCHIVED")
         if dataset["type"] not in load(template["dataset_types"]):
             raise ValueError("TEMPLATE_DATASET_TYPE_MISMATCH")
+        resolved_runtime_target = resolve_runtime_target(runtime_target, params)
         job_id = f"job_{uuid4().hex[:12]}"
         tags = {
             "platform.jobId": job_id,
             "platform.projectId": project_id,
+            "runtime_target": resolved_runtime_target["id"],
+            "runtime_target_kind": resolved_runtime_target["kind"],
             "model_type": template["model_type"],
             "dataset_version": dataset_ref,
             "dataset_checksum": version["checksum"],
@@ -811,10 +819,10 @@ class CortexApp:
             """
             INSERT INTO training_jobs(
               id, project_id, template_id, dataset_version_id, experiment_name, params, status,
-              mlflow_run_id, log_uri, owner, team, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+              mlflow_run_id, log_uri, owner, team, created_at, runtime_target
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, project_id, template_id, version["id"], experiment_name, dump(params), run_id, str(log_path), owner, team, ts),
+            (job_id, project_id, template_id, version["id"], experiment_name, dump(params), run_id, str(log_path), owner, team, ts, dump(resolved_runtime_target)),
         )
         self.conn.execute(
             """
@@ -823,7 +831,7 @@ class CortexApp:
             """,
             (f"link_{uuid4().hex[:12]}", version["id"], job_id, run_id, now()),
         )
-        self.audit(owner, team, "training.job.submit", "training_job", job_id, {"templateId": template_id, "datasetRef": dataset_ref})
+        self.audit(owner, team, "training.job.submit", "training_job", job_id, {"templateId": template_id, "datasetRef": dataset_ref, "runtimeTarget": resolved_runtime_target["id"]})
         self.conn.commit()
         return self.get_training_job(job_id)
 
@@ -883,6 +891,7 @@ class CortexApp:
             dataset=dataset,
             version=version,
             params=job["params"],
+            runtime_target=job["runtimeTarget"],
             work_dir=work_dir,
             log_path=log_path,
             progress=progress,
@@ -1456,7 +1465,17 @@ class CortexApp:
         version_row = decode_row(self.conn.execute("SELECT * FROM dataset_versions WHERE id = ?", (job["datasetVersionId"],)).fetchone())
         version = public_version(version_row)
         dataset_ref = f"{version['datasetId']}@{version['version']}"
-        return self.submit_training_job(job["templateId"], dataset_ref, job["experimentName"], job["params"], job["owner"], job["team"], wait=wait, project_id=job["projectId"])
+        return self.submit_training_job(
+            job["templateId"],
+            dataset_ref,
+            job["experimentName"],
+            job["params"],
+            job["owner"],
+            job["team"],
+            wait=wait,
+            project_id=job["projectId"],
+            runtime_target=job["runtimeTarget"],
+        )
 
     def get_run(self, run_id: str) -> dict:
         run = self.mlflow.get_run(run_id)

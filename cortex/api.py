@@ -288,6 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                         body.get("owner", "unknown"),
                         body.get("team", "unknown"),
                         body.get("projectId"),
+                        body.get("runtimeTarget", body.get("runtime_target")),
                     ),
                 )
             elif parts[:3] == ["api", "v1", "training"] and len(parts) == 6 and parts[3] == "jobs" and parts[5] == "cancel":

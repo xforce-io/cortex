@@ -93,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--owner", required=True)
     submit.add_argument("--team", required=True)
     submit.add_argument("--project")
+    submit.add_argument("--runtime-target")
     submit.add_argument("--param", action="append", default=[])
     submit.add_argument("--wait", action="store_true")
     train_sub.add_parser("status").add_argument("job_id")
@@ -187,7 +188,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.group == "train" and args.command == "templates":
             print_json(app.list_templates())
         elif args.group == "train" and args.command == "submit":
-            print_json(app.submit_training_job(args.template, args.dataset, args.experiment, parse_params(args.param), args.owner, args.team, wait=args.wait, project_id=args.project))
+            print_json(
+                app.submit_training_job(
+                    args.template,
+                    args.dataset,
+                    args.experiment,
+                    parse_params(args.param),
+                    args.owner,
+                    args.team,
+                    wait=args.wait,
+                    project_id=args.project,
+                    runtime_target=args.runtime_target,
+                )
+            )
         elif args.group == "train" and args.command == "status":
             print_json(app.get_training_job(args.job_id))
         elif args.group == "train" and args.command == "logs":

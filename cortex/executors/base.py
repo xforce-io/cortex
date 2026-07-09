@@ -18,6 +18,7 @@ class TrainingContext:
     dataset: dict
     version: dict
     params: dict
+    runtime_target: dict
     work_dir: Path
     log_path: Path
     progress: Callable[[int, str], None]
