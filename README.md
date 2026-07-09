@@ -153,10 +153,11 @@ It verifies the Cortex lifecycle for `guangyuan-lstm-trainer`: external template
 external preflight execution, training job completion, `pred_result.npz` artifact
 collection, experiment result import, and compare output.
 
-Training jobs record a `runtimeTarget`. The default target is `local`; callers can
-explicitly pass another target such as `gpu-3090` through the SDK, API, or CLI. The
-target is exposed to external preflight hooks through `context.runtime_target` so
-capabilities can distinguish local smoke runs from remote full-training targets
+Training jobs record a `runtimeTarget`. The only built-in target is `local`;
+remote targets must be supplied by the caller or deployment configuration through
+job metadata, for example `{"id": "remote-gpu", "kind": "ssh", "host": "..."}`.
+The target is exposed to external preflight hooks through `context.runtime_target`
+so capabilities can distinguish local smoke runs from remote full-training targets
 without splitting one executor into local and remote variants.
 
 The compose validation test requires Docker:
