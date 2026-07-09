@@ -153,9 +153,12 @@ It verifies the Cortex lifecycle for `guangyuan-lstm-trainer`: external template
 external preflight execution, training job completion, `pred_result.npz` artifact
 collection, experiment result import, and compare output.
 
+The Guangyuan reproduction operating runbook is
+[`docs/runbooks/14-guangyuan-reproduction.md`](docs/runbooks/14-guangyuan-reproduction.md).
+
 Training jobs record a `runtimeTarget`. The only built-in target is `local`;
 remote targets must be supplied by the caller or deployment configuration through
-job metadata, for example `{"id": "remote-gpu", "kind": "ssh", "host": "..."}`.
+job metadata, for example `{"id": "remote-training", "kind": "ssh", "host": "<managed-by-deployment>"}`.
 The target is exposed to external preflight hooks through `context.runtime_target`
 so capabilities can distinguish local smoke runs from remote full-training targets
 without splitting one executor into local and remote variants.
