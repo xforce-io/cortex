@@ -94,6 +94,10 @@ button {
 }
 
 .workspace-mode .nav-list {
+  display: grid;
+}
+
+.workspace-mode .nav-item[data-project-only="true"] {
   display: none;
 }
 
@@ -492,6 +496,65 @@ label span {
 .table-view.active {
   display: grid;
   gap: 12px;
+}
+
+.runbook-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.6fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.runbook-list {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.runbook-detail {
+  margin-top: 0;
+}
+
+.runbook-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.runbook-meta-grid section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfc;
+}
+
+.runbook-markdown {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runbook-markdown h1,
+.runbook-markdown h2,
+.runbook-markdown h3 {
+  margin-top: 6px;
+}
+
+.runbook-markdown h1 {
+  font-size: 22px;
+}
+
+.runbook-markdown h2 {
+  font-size: 17px;
+}
+
+.runbook-markdown h3 {
+  font-size: 15px;
+}
+
+.runbook-markdown ul {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .table-wrap {

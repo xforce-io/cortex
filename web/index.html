@@ -18,12 +18,13 @@
         </div>
         <nav class="nav-list">
           <button class="nav-item active" data-view="dashboard" data-i18n="nav.dashboard">仪表盘</button>
-          <button class="nav-item" data-view="datasets" data-i18n="nav.datasets">数据集</button>
-          <button class="nav-item" data-view="training" data-i18n="nav.training">训练</button>
-          <button class="nav-item" data-view="runs" data-i18n="nav.runs">实验</button>
-          <button class="nav-item" data-view="results" data-i18n="nav.results">结果</button>
-          <button class="nav-item" data-view="models" data-i18n="nav.models">模型</button>
-          <button class="nav-item" data-view="tests" data-i18n="nav.tests">评估</button>
+          <button class="nav-item" data-view="runbooks" data-i18n="nav.runbooks">复现</button>
+          <button class="nav-item" data-view="datasets" data-project-only="true" data-i18n="nav.datasets">数据集</button>
+          <button class="nav-item" data-view="training" data-project-only="true" data-i18n="nav.training">训练</button>
+          <button class="nav-item" data-view="runs" data-project-only="true" data-i18n="nav.runs">实验</button>
+          <button class="nav-item" data-view="results" data-project-only="true" data-i18n="nav.results">结果</button>
+          <button class="nav-item" data-view="models" data-project-only="true" data-i18n="nav.models">模型</button>
+          <button class="nav-item" data-view="tests" data-project-only="true" data-i18n="nav.tests">评估</button>
         </nav>
         <div class="sidebar-status">
           <span class="status-dot" id="healthDot"></span>
@@ -277,6 +278,24 @@
             </table>
           </div>
           <section class="resource-detail" id="resultDetail" aria-live="polite"></section>
+        </section>
+
+        <section id="runbooks" class="table-view">
+          <div class="section-header">
+            <h2 data-i18n="nav.runbooks">复现</h2>
+            <span id="runbookCount">0 条记录</span>
+          </div>
+          <div class="runbook-layout">
+            <div class="table-wrap runbook-list">
+              <table>
+                <thead>
+                  <tr><th data-i18n="field.name">名称</th><th data-i18n="field.source">来源</th></tr>
+                </thead>
+                <tbody id="runbooksBody"></tbody>
+              </table>
+            </div>
+            <section class="resource-detail runbook-detail" id="runbookDetail" aria-live="polite"></section>
+          </div>
         </section>
 
         <section id="tests" class="table-view">

@@ -1773,6 +1773,39 @@ class Phase1StoriesTest(unittest.TestCase):
         self.assertEqual(dashboard["summary"]["testSets"], 2)
         self.assertEqual(dashboard["summary"]["evaluations"], 1)
 
+    def test_api_and_static_ui_expose_runbooks(self):
+        env = os.environ.copy()
+        env["CORTEX_HOME"] = str(self.home)
+        env["CORTEX_HOST"] = "127.0.0.1"
+        env["CORTEX_PORT"] = "8774"
+        env["PYTHONPATH"] = str(ROOT)
+        env.pop("MLFLOW_TRACKING_URI", None)
+        env.pop("MLFLOW_S3_ENDPOINT_URL", None)
+        server = subprocess.Popen(
+            [sys.executable, "-m", "cortex.api"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self._wait_for_health("http://127.0.0.1:8774/healthz")
+            runbooks = self._api_get("http://127.0.0.1:8774/api/v1/runbooks")
+            detail = self._api_get("http://127.0.0.1:8774/api/v1/runbooks/14-guangyuan-reproduction")
+            index = self._api_text("http://127.0.0.1:8774/")
+            app_js = self._api_text("http://127.0.0.1:8774/app.js")
+
+            self.assertTrue(any(item["id"] == "14-guangyuan-reproduction" for item in runbooks))
+            self.assertEqual(detail["title"], "Guangyuan Reproduction Runbook")
+            self.assertIn("GUANGYUAN_RUNTIME_TARGET_REQUIRED", detail["content"])
+            self.assertIn('data-view="runbooks"', index)
+            self.assertIn('id="runbookDetail"', index)
+            self.assertIn("复现", index)
+            self.assertIn("renderRunbooks", app_js)
+        finally:
+            server.send_signal(signal.SIGINT)
+            server.wait(timeout=5)
+
     def _wait_for_health(self, url: str) -> None:
         deadline = time.time() + 8
         while time.time() < deadline:

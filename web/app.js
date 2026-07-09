@@ -13,6 +13,13 @@ const state = {
     result: null,
     evaluation: null,
   },
+  runbooks: {
+    items: [],
+    selectedId: null,
+    details: {},
+    loading: false,
+    error: "",
+  },
   details: {},
   datasetVersionTargets: {},
   trainingForm: {
@@ -36,6 +43,7 @@ const state = {
     runs: false,
     models: false,
     results: false,
+    runbooks: false,
     evaluations: false,
   },
   catalog: {
@@ -90,6 +98,7 @@ const I18N = {
     "common.noProjects": "没有项目",
     "common.noRunMetrics": "没有运行指标",
     "common.noRunSelected": "未选择运行",
+    "common.noRunbooks": "没有复现 runbook",
     "common.noVersions": "没有版本",
     "common.notRegistered": "未注册",
     "common.notRegisterable": "不可注册",
@@ -176,6 +185,7 @@ const I18N = {
     "nav.datasets": "数据集",
     "nav.models": "模型",
     "nav.results": "结果",
+    "nav.runbooks": "复现",
     "nav.runs": "实验",
     "nav.tests": "评估",
     "nav.training": "训练",
@@ -198,6 +208,9 @@ const I18N = {
     "section.projectLink": "项目引用",
     "section.params": "参数",
     "section.runMetrics": "运行指标",
+    "section.runbookContent": "Runbook 内容",
+    "section.runbookLifecycle": "生命周期入口",
+    "section.sections": "章节",
     "section.tags": "标签",
     "section.versions": "版本",
     "select.dataset": "选择一个数据集",
@@ -211,6 +224,7 @@ const I18N = {
     "table.noJobs": "没有任务",
     "table.noModels": "没有模型",
     "table.noResults": "没有结果",
+    "table.noRunbooks": "没有复现 runbook",
     "table.noRuns": "没有运行",
   },
   en: {
@@ -250,6 +264,7 @@ const I18N = {
     "common.noProjects": "No projects",
     "common.noRunMetrics": "No run metrics",
     "common.noRunSelected": "No run selected",
+    "common.noRunbooks": "No runbooks",
     "common.noVersions": "No versions",
     "common.notRegistered": "Not registered",
     "common.notRegisterable": "Not registerable",
@@ -336,6 +351,7 @@ const I18N = {
     "nav.datasets": "Datasets",
     "nav.models": "Models",
     "nav.results": "Results",
+    "nav.runbooks": "Runbooks",
     "nav.runs": "Experiments",
     "nav.tests": "Evaluations",
     "nav.training": "Training",
@@ -358,6 +374,9 @@ const I18N = {
     "section.projectLink": "Project link",
     "section.params": "Params",
     "section.runMetrics": "Run Metrics",
+    "section.runbookContent": "Runbook Content",
+    "section.runbookLifecycle": "Lifecycle Surface",
+    "section.sections": "Sections",
     "section.tags": "Tags",
     "section.versions": "Versions",
     "select.dataset": "Select a dataset",
@@ -371,6 +390,7 @@ const I18N = {
     "table.noJobs": "No jobs",
     "table.noModels": "No models",
     "table.noResults": "No results",
+    "table.noRunbooks": "No runbooks",
     "table.noRuns": "No runs",
   },
 };
@@ -505,9 +525,21 @@ async function refresh() {
   setHealth("checking");
   try {
     await api("/healthz");
-    state.dashboard = state.currentProjectId
-      ? await api(`/api/v1/projects/${encodeURIComponent(state.currentProjectId)}/dashboard`)
-      : await api("/api/v1/dashboard");
+    const [dashboard, runbooks] = await Promise.all([
+      state.currentProjectId
+        ? api(`/api/v1/projects/${encodeURIComponent(state.currentProjectId)}/dashboard`)
+        : api("/api/v1/dashboard"),
+      api("/api/v1/runbooks"),
+    ]);
+    state.dashboard = dashboard;
+    state.runbooks.items = runbooks;
+    state.runbooks.error = "";
+    if (!state.runbooks.selectedId || !runbooks.some((item) => item.id === state.runbooks.selectedId)) {
+      state.runbooks.selectedId = runbooks[0]?.id || null;
+    }
+    if (state.runbooks.selectedId && !state.runbooks.details[state.runbooks.selectedId]) {
+      await loadRunbookDetail(state.runbooks.selectedId, false);
+    }
     state.projects = state.dashboard.projects || [];
     state.selectedRun = state.dashboard.runs[0] || null;
     render();
@@ -535,8 +567,9 @@ function render() {
   $("#projectWorkspace").hidden = !inProject;
   $("#projectBackButton").hidden = !inProject;
   $("#lastUpdated").textContent = `${state.locale === "zh-CN" ? "已同步" : "Synced"} ${new Date().toLocaleTimeString(state.locale)}`;
+  renderRunbooks();
   if (!inProject) {
-    applyView("dashboard");
+    applyView(state.activeView === "runbooks" ? "runbooks" : "dashboard");
     return;
   }
   $("#metricDatasets").textContent = summary.datasets;
@@ -849,6 +882,109 @@ function jsonBlock(value) {
 function renderCollection(items, emptyLabel = t("common.empty")) {
   if (!items?.length) return `<p class="muted">${escapeHtml(emptyLabel)}</p>`;
   return `<ul class="detail-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const html = [];
+  let inCode = false;
+  let codeLines = [];
+  let inList = false;
+  const closeList = () => {
+    if (inList) {
+      html.push("</ul>");
+      inList = false;
+    }
+  };
+  const inline = (value) => escapeHtml(value).replace(/`([^`]+)`/g, "<code>$1</code>");
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      if (inCode) {
+        html.push(`<pre class="detail-json"><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        codeLines = [];
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      closeList();
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      closeList();
+      html.push(`<h1>${inline(line.slice(2).trim())}</h1>`);
+    } else if (line.startsWith("## ")) {
+      closeList();
+      html.push(`<h2>${inline(line.slice(3).trim())}</h2>`);
+    } else if (line.startsWith("### ")) {
+      closeList();
+      html.push(`<h3>${inline(line.slice(4).trim())}</h3>`);
+    } else if (line.startsWith("- ")) {
+      if (!inList) {
+        html.push("<ul>");
+        inList = true;
+      }
+      html.push(`<li>${inline(line.slice(2).trim())}</li>`);
+    } else {
+      closeList();
+      html.push(`<p>${inline(line.trim())}</p>`);
+    }
+  }
+  closeList();
+  if (inCode) html.push(`<pre class="detail-json"><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  return html.join("");
+}
+
+function renderRunbooks() {
+  const count = $("#runbookCount");
+  const body = $("#runbooksBody");
+  const detail = $("#runbookDetail");
+  if (!count || !body || !detail) return;
+  const items = state.runbooks.items || [];
+  count.textContent = state.runbooks.loading ? t("health.checking") : t("common.records", { count: items.length });
+  body.innerHTML = limitedRows(
+    "runbooks",
+    items,
+    2,
+    (runbook) =>
+      `<tr class="selectable-row${state.runbooks.selectedId === runbook.id ? " selected" : ""}" data-select-runbook="${escapeHtml(runbook.id)}" tabindex="0"><td>${escapeHtml(runbook.title)}</td><td class="mono">${escapeHtml(runbook.path)}</td></tr>`,
+    t("table.noRunbooks"),
+  );
+  const selected = state.runbooks.selectedId;
+  const current = selected ? state.runbooks.details[selected] || items.find((item) => item.id === selected) : null;
+  if (!current) {
+    detail.innerHTML = `<p class="muted">${state.runbooks.error ? escapeHtml(state.runbooks.error) : t("common.noRunbooks")}</p>`;
+    return;
+  }
+  const lifecycle = ["Datasets", "Training jobs", "Experiment results", "Compare", "Resource guard"];
+  detail.innerHTML = `
+    <div class="detail-header">
+      <div>
+        <h3>${escapeHtml(current.title)}</h3>
+        <p class="muted mono">${escapeHtml(current.path)}</p>
+      </div>
+    </div>
+    <p>${escapeHtml(current.summary || "")}</p>
+    <div class="runbook-meta-grid">
+      <section>
+        <h4>${t("section.sections")}</h4>
+        ${renderCollection(current.sections || [], t("common.empty"))}
+      </section>
+      <section>
+        <h4>${t("section.runbookLifecycle")}</h4>
+        ${renderCollection(lifecycle)}
+      </section>
+    </div>
+    <h4>${t("section.runbookContent")}</h4>
+    <article class="runbook-markdown">${renderMarkdown(current.content || "")}</article>
+  `;
 }
 
 function findLatestDatasetVersion(dataset, versions) {
@@ -1746,6 +1882,21 @@ async function loadResourceDetail(type, id) {
   renderAllDetails();
 }
 
+async function loadRunbookDetail(id, shouldRender = true) {
+  if (!id) return;
+  state.runbooks.loading = true;
+  state.runbooks.error = "";
+  if (shouldRender) renderRunbooks();
+  try {
+    state.runbooks.details[id] = await api(`/api/v1/runbooks/${encodeURIComponent(id)}`);
+  } catch (error) {
+    state.runbooks.error = error.message;
+  } finally {
+    state.runbooks.loading = false;
+  }
+  if (shouldRender) renderRunbooks();
+}
+
 async function previewDatasetVersion(version) {
   const dataset = findResource("dataset", state.selected.dataset);
   if (!dataset || !version) return;
@@ -1884,13 +2035,13 @@ async function runFullTest() {
 }
 
 function applyView(view) {
-  if (!state.currentProjectId && view !== "dashboard") view = "dashboard";
+  if (!state.currentProjectId && !["dashboard", "runbooks"].includes(view)) view = "dashboard";
   state.activeView = view;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".dashboard-view").forEach((section) => section.classList.toggle("active", section.id === view));
   document.querySelectorAll(".table-view").forEach((section) => section.classList.toggle("active", section.id === view));
   const project = state.dashboard?.project;
-  document.querySelector("h1").textContent = project ? project.name : t("page.projects");
+  document.querySelector("h1").textContent = view === "runbooks" ? t("nav.runbooks") : project ? project.name : t("page.projects");
   const selectedByView = {
     datasets: ["dataset", state.selected.dataset],
     training: ["job", state.selected.job],
@@ -1939,6 +2090,14 @@ document.addEventListener("click", (event) => {
   if (metricLink) {
     event.preventDefault();
     applyView(metricLink.dataset.viewTarget);
+    return;
+  }
+  const runbookRow = event.target.closest("[data-select-runbook]");
+  if (runbookRow) {
+    event.preventDefault();
+    state.runbooks.selectedId = runbookRow.dataset.selectRunbook;
+    renderRunbooks();
+    loadRunbookDetail(state.runbooks.selectedId);
     return;
   }
   const catalogStatusButton = event.target.closest("[data-catalog-status]");
@@ -2052,6 +2211,14 @@ document.addEventListener("keydown", (event) => {
   if (datasetVersionButton) {
     event.preventDefault();
     jumpToDatasetVersion(datasetVersionButton.dataset.jumpDatasetVersion);
+    return;
+  }
+  const runbookRow = event.target.closest("[data-select-runbook]");
+  if (runbookRow) {
+    event.preventDefault();
+    state.runbooks.selectedId = runbookRow.dataset.selectRunbook;
+    renderRunbooks();
+    loadRunbookDetail(state.runbooks.selectedId);
     return;
   }
   const row = event.target.closest("tr[data-resource-type]");

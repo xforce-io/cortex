@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .app import CortexApp
 from . import logging as cortex_logging
+from .runbooks import get_runbook, list_runbooks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +125,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.list_evaluations())
             elif parts == ["api", "v1", "experiment-results"]:
                 self._json(200, self.app.list_experiment_results())
+            elif parts == ["api", "v1", "runbooks"]:
+                self._json(200, list_runbooks())
+            elif parts[:3] == ["api", "v1", "runbooks"] and len(parts) == 4:
+                self._json(200, get_runbook(parts[3]))
             elif parts == ["api", "v1", "experiment-results:compare"]:
                 self._json(
                     200,
