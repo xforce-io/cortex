@@ -20,6 +20,7 @@ from .executors import ExecutionResult, TrainingContext, builtin_executor_regist
 from .executors.capability_loader import capability_repo_paths, load_capability_repositories
 from .executors.provenance import executor_provenance_for, flatten_executor_provenance
 from .mlflow_local import LocalMlflow
+from .resource_guard import ResourceGuardError, cleanup_resource_guard, run_resource_guard
 from .runtime_targets import resolve_runtime_target
 from .storage import ObjectStorage
 
@@ -118,6 +119,7 @@ def public_job(row: dict) -> dict:
         "executorRef": row["executor_ref"],
         "executorProvenance": load(row.get("executor_provenance") or "{}"),
         "runtimeTarget": load(row.get("runtime_target") or "{}"),
+        "resourceGuard": load(row.get("resource_guard") or "{}"),
         "logUri": row["log_uri"],
         "errorMessage": row["error_message"],
         "progressPercent": progress,
@@ -844,12 +846,18 @@ class CortexApp:
         )
         self.conn.commit()
         log_path = Path(job["logUri"])
+        resource_guard = job.get("resourceGuard") or {}
+        work_dir = self.home / "jobs" / job_id
         try:
             version_row = decode_row(self.conn.execute("SELECT * FROM dataset_versions WHERE id = ?", (job["datasetVersionId"],)).fetchone())
             version = public_version(version_row)
             if self.storage.checksum(version["storageUri"], version["format"]) != version["checksum"]:
                 raise ValueError("CHECKSUM_MISMATCH")
             dataset = self.get_dataset(version["datasetId"])
+            resource_guard = run_resource_guard(job, work_dir)
+            self.conn.execute("UPDATE training_jobs SET resource_guard = ? WHERE id = ?", (dump(resource_guard), job_id))
+            self.conn.commit()
+            job["resourceGuard"] = resource_guard
             result = self._execute_template(job, dataset, version, log_path)
             metrics = result.metrics
             dataset_ref = f"{version['datasetId']}@{version['version']}"
@@ -864,6 +872,11 @@ class CortexApp:
             self.conn.execute("UPDATE training_jobs SET status = 'succeeded', finished_at = ? WHERE id = ?", (now(), job_id))
             cortex_logging.info("training job succeeded id=%s metrics=%s", job_id, json.dumps(metrics, sort_keys=True))
         except Exception as exc:
+            if isinstance(exc, ResourceGuardError):
+                resource_guard = exc.result
+                self.conn.execute("UPDATE training_jobs SET resource_guard = ? WHERE id = ?", (dump(resource_guard), job_id))
+                self.conn.commit()
+            cleanup_resource_guard(resource_guard, work_dir)
             previous_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
             log_path.write_text(previous_log + "\n" + traceback.format_exc(), encoding="utf-8")
             self.mlflow.update_run(job["mlflowRunId"], status="FAILED")
@@ -892,6 +905,7 @@ class CortexApp:
             version=version,
             params=job["params"],
             runtime_target=job["runtimeTarget"],
+            resource_guard=job.get("resourceGuard") or {},
             work_dir=work_dir,
             log_path=log_path,
             progress=progress,
