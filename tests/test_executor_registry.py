@@ -754,6 +754,156 @@ class Executor:
             finally:
                 app.conn.close()
 
+    def test_resource_guard_failure_blocks_external_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "resource-guard-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: resource-guard-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: resource-guard-executor
+    name: Resource Guard Executor
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Executor:
+    def run(self, context):
+        (context.work_dir / "executor-ran.txt").write_text("ran", encoding="utf-8")
+        return ExecutionResult(metrics={"rows": 1}, model_payload={"modelKind": "resource_guard"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "resource-guard"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "resource-guard-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/resource-guard/v1/train.csv", source)
+                dataset = app.create_dataset("resource-guard", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/resource-guard/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "resource-guard-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/resource-guard",
+                    {"resource_guard": {"min_free_gb": 10**9, "temp_dir": "scratch"}},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("RESOURCE_GUARD_FAILED:disk", job["errorMessage"])
+                self.assertEqual(job["resourceGuard"]["status"], "failed")
+                self.assertFalse((app.home / "jobs" / job["id"] / "executor-ran.txt").exists())
+            finally:
+                app.conn.close()
+
+    def test_resource_guard_temp_dir_is_cleaned_when_executor_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "resource-cleanup-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: resource-cleanup-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: resource-cleanup-executor
+    name: Resource Cleanup Executor
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+class Executor:
+    def run(self, context):
+        temp_dir = context.resource_guard["tempDir"]
+        import pathlib
+        pathlib.Path(temp_dir, "temp.bin").write_text("tmp", encoding="utf-8")
+        raise ValueError("TEST_EXECUTOR_FAILED")
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "resource-cleanup"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "resource-cleanup-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/resource-cleanup/v1/train.csv", source)
+                dataset = app.create_dataset("resource-cleanup", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/resource-cleanup/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job(
+                    "resource-cleanup-executor",
+                    f"{dataset['id']}@{version['version']}",
+                    "demo/resource-cleanup",
+                    {"resource_guard": {"min_free_gb": 0.001, "temp_dir": "scratch", "cleanup_on_failure": True}},
+                    "alice",
+                    "ml",
+                    wait=True,
+                )
+
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("TEST_EXECUTOR_FAILED", job["errorMessage"])
+                self.assertEqual(job["resourceGuard"]["status"], "passed")
+                self.assertFalse(Path(job["resourceGuard"]["tempDir"]).exists())
+                self.assertTrue(Path(job["logUri"]).exists())
+            finally:
+                app.conn.close()
+
     def test_external_executor_missing_required_artifact_fails_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

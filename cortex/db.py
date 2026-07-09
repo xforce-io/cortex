@@ -200,6 +200,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "training_jobs", "status_message", "TEXT NOT NULL DEFAULT 'Queued'")
     ensure_column(conn, "training_jobs", "executor_provenance", "TEXT NOT NULL DEFAULT '{}'")
     ensure_column(conn, "training_jobs", "runtime_target", "TEXT NOT NULL DEFAULT '{\"id\":\"local\",\"kind\":\"local\",\"capabilities\":[\"cpu\"],\"explicit\":false}'")
+    ensure_column(conn, "training_jobs", "resource_guard", "TEXT NOT NULL DEFAULT '{}'")
     ensure_column(conn, "dataset_versions", "profile_json", "TEXT NOT NULL DEFAULT '{}'")
     seed_templates(conn)
     conn.commit()

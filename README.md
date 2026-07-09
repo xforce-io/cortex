@@ -160,6 +160,11 @@ The target is exposed to external preflight hooks through `context.runtime_targe
 so capabilities can distinguish local smoke runs from remote full-training targets
 without splitting one executor into local and remote variants.
 
+Long-running jobs can declare a `resource_guard` in params. Cortex checks local
+disk space before running the executor, constrains guard-managed temp directories
+to the job work directory, records `resourceGuard` on the job, and can clean up
+the guard temp directory on failure while preserving logs and run metadata.
+
 The compose validation test requires Docker:
 
 ```bash

@@ -1314,10 +1314,9 @@ class Phase1StoriesTest(unittest.TestCase):
                     "templateId": "sklearn-kmeans",
                     "datasetRef": f"{dataset['id']}@v1",
                     "experimentName": "demo/iris",
-                    "params": {"n_clusters": 2},
+                    "params": {"n_clusters": 2, "resource_guard": {"min_free_gb": 0.001, "temp_dir": "scratch"}},
                     "owner": "alice",
                     "team": "ml",
-                    "runtimeTarget": {"id": "remote-gpu", "kind": "ssh", "host": "runtime.example.internal", "capabilities": ["gpu"]},
                 },
             )
             self.assertIn(job["status"], {"pending", "running"})
@@ -1328,9 +1327,10 @@ class Phase1StoriesTest(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertEqual(job["status"], "succeeded")
-            self.assertEqual(job["runtimeTarget"]["id"], "remote-gpu")
-            self.assertEqual(job["runtimeTarget"]["kind"], "ssh")
-            self.assertEqual(job["runtimeTarget"]["host"], "runtime.example.internal")
+            self.assertEqual(job["runtimeTarget"]["id"], "local")
+            self.assertEqual(job["resourceGuard"]["status"], "passed")
+            self.assertEqual(job["resourceGuard"]["targetId"], "local")
+            self.assertTrue(Path(job["resourceGuard"]["tempDir"]).is_dir())
             run = self._api_get(f"http://127.0.0.1:8766/api/v1/runs/{job['mlflowRunId']}")
             model_version = self._api_post(
                 "http://127.0.0.1:8766/api/v1/models/demo-iris-model/versions",
