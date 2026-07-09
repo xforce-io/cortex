@@ -79,6 +79,9 @@ class Phase1StoriesTest(unittest.TestCase):
 
         run = self.app.get_run(job["mlflowRunId"])
         self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["runtimeTarget"]["id"], "local")
+        self.assertEqual(job["runtimeTarget"]["kind"], "local")
+        self.assertFalse(job["runtimeTarget"]["explicit"])
         self.assertEqual(job["progressPercent"], 100)
         self.assertEqual(run["tags"]["platform.jobId"], job["id"])
         self.assertEqual(run["tags"]["dataset_version"], f"{dataset['id']}@v1")
@@ -1314,6 +1317,7 @@ class Phase1StoriesTest(unittest.TestCase):
                     "params": {"n_clusters": 2},
                     "owner": "alice",
                     "team": "ml",
+                    "runtimeTarget": "gpu-3090",
                 },
             )
             self.assertIn(job["status"], {"pending", "running"})
@@ -1324,6 +1328,8 @@ class Phase1StoriesTest(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertEqual(job["status"], "succeeded")
+            self.assertEqual(job["runtimeTarget"]["id"], "gpu-3090")
+            self.assertEqual(job["runtimeTarget"]["kind"], "ssh")
             run = self._api_get(f"http://127.0.0.1:8766/api/v1/runs/{job['mlflowRunId']}")
             model_version = self._api_post(
                 "http://127.0.0.1:8766/api/v1/models/demo-iris-model/versions",
