@@ -425,6 +425,215 @@ class Executor:
             finally:
                 app.conn.close()
 
+    def test_external_executor_preflight_runs_before_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "preflight-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: preflight-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: preflight-executor
+    name: Preflight Executor
+    description: Runs a preflight hook before training.
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    preflight:
+      entrypoint: python:src.executor:Preflight
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Preflight:
+    def run(self, context):
+        context.params["preflight_checked"] = True
+
+
+class Executor:
+    def run(self, context):
+        if not context.params.get("preflight_checked"):
+            raise AssertionError("preflight did not run")
+        return ExecutionResult(metrics={"rows": 1}, model_payload={"modelKind": "preflight"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "preflight"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                templates = {template["id"]: template for template in app.list_templates()}
+                self.assertEqual(templates["preflight-executor"]["executorStatus"], "available")
+
+                source = root / "preflight-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/preflight/v1/train.csv", source)
+                dataset = app.create_dataset("preflight", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/preflight/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job("preflight-executor", f"{dataset['id']}@{version['version']}", "demo/preflight", {}, "alice", "ml", wait=True)
+
+                self.assertEqual(job["status"], "succeeded")
+            finally:
+                app.conn.close()
+
+    def test_external_executor_preflight_failure_blocks_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "preflight-fail-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: preflight-fail-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: preflight-fail-executor
+    name: Preflight Fail Executor
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    preflight:
+      entrypoint: python:src.executor:Preflight
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Preflight:
+    def run(self, context):
+        raise ValueError("TEST_PREFLIGHT_FAILED:missing_dependency")
+
+
+class Executor:
+    def run(self, context):
+        (context.work_dir / "executor-ran.txt").write_text("ran", encoding="utf-8")
+        return ExecutionResult(metrics={"rows": 1}, model_payload={"modelKind": "should_not_run"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "preflight-fail"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                source = root / "preflight-fail-train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/preflight-fail/v1/train.csv", source)
+                dataset = app.create_dataset("preflight-fail", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/preflight-fail/v1/train.csv", "csv", created_by="alice")
+
+                job = app.submit_training_job("preflight-fail-executor", f"{dataset['id']}@{version['version']}", "demo/preflight-fail", {}, "alice", "ml", wait=True)
+
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("TEST_PREFLIGHT_FAILED:missing_dependency", job["errorMessage"])
+                self.assertFalse((app.home / "jobs" / job["id"] / "executor-ran.txt").exists())
+                self.assertEqual(app.list_experiment_results(), [])
+            finally:
+                app.conn.close()
+
+    def test_bad_external_preflight_entrypoint_is_visible_but_not_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "ai-capability"
+            capability = repo / "projects" / "bad-preflight-capability"
+            src = capability / "src"
+            src.mkdir(parents=True)
+            (capability / "capability.yaml").write_text(
+                """
+name: bad-preflight-capability
+owner: algorithm-team
+status: experimental
+type: training
+executors:
+  - id: bad-preflight-executor
+    name: Bad Preflight Executor
+    model_type: external
+    dataset_types:
+      - tabular
+    entrypoint: python:src.executor:Executor
+    preflight:
+      entrypoint: python:src.missing:Preflight
+    param_schema: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (src / "executor.py").write_text(
+                """
+from cortex.executors import ExecutionResult
+
+
+class Executor:
+    def run(self, context):
+        return ExecutionResult(metrics={"rows": 1}, model_payload={"modelKind": "bad_preflight"})
+""".lstrip(),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "bad-preflight"], cwd=repo, check=True, capture_output=True)
+
+            previous = os.environ.get("CORTEX_CAPABILITY_REPOS")
+            os.environ["CORTEX_CAPABILITY_REPOS"] = str(repo)
+            try:
+                app = CortexApp.open(root / "cortex")
+            finally:
+                if previous is None:
+                    os.environ.pop("CORTEX_CAPABILITY_REPOS", None)
+                else:
+                    os.environ["CORTEX_CAPABILITY_REPOS"] = previous
+            try:
+                templates = {template["id"]: template for template in app.list_templates()}
+                self.assertEqual(templates["bad-preflight-executor"]["executorStatus"], "not_implemented")
+                self.assertIn("PREFLIGHT_IMPORT_FAILED", templates["bad-preflight-executor"]["executorStatusReason"])
+            finally:
+                app.conn.close()
+
     def test_external_executor_missing_required_artifact_fails_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

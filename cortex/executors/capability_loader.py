@@ -77,6 +77,7 @@ def build_executor_spec(repo_path: Path, manifest_path: Path, capability_name: s
     entrypoint = str(item.get("entrypoint") or "").strip()
     dataset_types = item.get("dataset_types")
     param_schema = item.get("param_schema")
+    preflight_entrypoint = parse_preflight_entrypoint(item.get("preflight"))
     if not template_id:
         raise ValueError("EXECUTOR_ID_REQUIRED")
     if not name:
@@ -100,6 +101,7 @@ def build_executor_spec(repo_path: Path, manifest_path: Path, capability_name: s
         dataset_types=[str(value) for value in dataset_types],
         param_schema=param_schema,
         entrypoint=entrypoint,
+        preflight_entrypoint=preflight_entrypoint,
         repo_path=repo_path,
         capability_root=manifest_path.parent,
         manifest_path=manifest_path,
@@ -147,13 +149,35 @@ def parse_executor_artifacts(raw_artifacts) -> list[ExecutorArtifactContract]:
     return artifacts
 
 
+def parse_preflight_entrypoint(raw_preflight) -> str | None:
+    if raw_preflight is None:
+        return None
+    if not isinstance(raw_preflight, dict):
+        raise ValueError("EXECUTOR_PREFLIGHT_INVALID")
+    entrypoint = str(raw_preflight.get("entrypoint") or "").strip()
+    if not entrypoint:
+        raise ValueError("EXECUTOR_PREFLIGHT_ENTRYPOINT_REQUIRED")
+    if not entrypoint.startswith("python:"):
+        raise ValueError("EXECUTOR_PREFLIGHT_ENTRYPOINT_UNSUPPORTED")
+    return entrypoint
+
+
 def load_capability_executor(spec: CapabilityExecutorSpec) -> CapabilityExecutorLoadResult:
     try:
         executor_class = parse_executor_entrypoint(spec.capability_root, spec.entrypoint)
         executor = executor_class()
         if not callable(getattr(executor, "run", None)):
             return CapabilityExecutorLoadResult(spec=spec, reason="EXECUTOR_RUN_REQUIRED")
-        return CapabilityExecutorLoadResult(spec=spec, executor=CapabilityExecutorWrapper(spec, executor))
+        preflight = None
+        if spec.preflight_entrypoint:
+            try:
+                preflight_class = parse_executor_entrypoint(spec.capability_root, spec.preflight_entrypoint)
+                preflight = preflight_class()
+            except Exception as exc:
+                return CapabilityExecutorLoadResult(spec=spec, reason=f"PREFLIGHT_IMPORT_FAILED:{exc}")
+            if not callable(getattr(preflight, "run", None)):
+                return CapabilityExecutorLoadResult(spec=spec, reason="PREFLIGHT_RUN_REQUIRED")
+        return CapabilityExecutorLoadResult(spec=spec, executor=CapabilityExecutorWrapper(spec, executor, preflight))
     except Exception as exc:
         return CapabilityExecutorLoadResult(spec=spec, reason=f"ENTRYPOINT_IMPORT_FAILED:{exc}")
 
