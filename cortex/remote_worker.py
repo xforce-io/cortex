@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     work_dir = Path(args.work_dir or request.get("workDir") or request_path.parent).expanduser()
     work_dir.mkdir(parents=True, exist_ok=True)
     log_path = work_dir / "worker.log"
+    # Detach stdio from the SSH pipe so long Keras/TF training cannot die with
+    # BrokenPipeError when the controller channel is quiet or briefly disrupted.
+    _redirect_stdio(log_path)
 
     try:
         result = run_remote_request(request, work_dir=work_dir, log_path=log_path)
@@ -38,13 +41,7 @@ def main(argv: list[str] | None = None) -> int:
                 "modelPayload": result.model_payload,
                 "logText": result.log_text or log_path.read_text(encoding="utf-8") if log_path.exists() else "",
                 "error": None,
-                "artifacts": [
-                    {
-                        "path": str(Path(spec.source).relative_to(work_dir)) if Path(spec.source).is_relative_to(work_dir) else Path(spec.source).name,
-                        "target": spec.target,
-                    }
-                    for spec in result.artifacts
-                ],
+                "artifacts": _artifact_payloads(request, result.artifacts, work_dir),
             },
         )
         return 0
@@ -196,6 +193,38 @@ def _fail(work_dir: Path, message: str) -> int:
         },
     )
     return 1
+
+
+def _redirect_stdio(log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = handle  # type: ignore[assignment]
+    sys.stderr = handle  # type: ignore[assignment]
+
+
+def _artifact_payloads(request: dict[str, Any], collected: list[ArtifactSpec], work_dir: Path) -> list[dict[str, Any]]:
+    declared = {
+        str(item.get("path") or "").strip(): item
+        for item in (request.get("artifacts") or [])
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    payloads: list[dict[str, Any]] = []
+    for spec in collected:
+        try:
+            relative = str(Path(spec.source).relative_to(work_dir))
+        except ValueError:
+            relative = Path(spec.source).name
+        meta = declared.get(relative) or declared.get(relative.replace("\\", "/")) or {}
+        payloads.append(
+            {
+                "path": relative.replace("\\", "/"),
+                "target": spec.target,
+                "kind": str(meta.get("kind") or "artifact"),
+                "required": bool(meta.get("required", True)),
+                "importResult": bool(meta.get("importResult") or meta.get("import_result") or False),
+            }
+        )
+    return payloads
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import shlex
 from pathlib import Path
 from typing import Any, Callable
@@ -153,13 +154,40 @@ def run_via_ssh(
         progress(25, "running")
         app._update_job_progress(job["id"], 25, "running")
         python_executable = str(target.get("pythonExecutable") or "python3")
+        # Launch worker under nohup so long training survives SSH channel disruption.
+        # Controller polls for result.json instead of holding a single long SSH exec.
+        launch_log = f"{remote_job_dir}/worker.launch.log"
         worker_cmd = (
-            f"{shlex.quote(python_executable)} -m cortex.remote_worker "
+            f"nohup {shlex.quote(python_executable)} -m cortex.remote_worker "
             f"--request {shlex.quote(remote_request_path)} "
-            f"--work-dir {shlex.quote(remote_job_dir)}"
+            f"--work-dir {shlex.quote(remote_job_dir)} "
+            f"> {shlex.quote(launch_log)} 2>&1 & echo $!"
         )
         worker_result = transport.run(worker_cmd)
-        # Always attempt to collect result.json; failure modes are encoded there when possible.
+        if worker_result.exit_code != 0:
+            detail = (worker_result.stderr or worker_result.stdout or str(worker_result.exit_code)).strip()
+            raise ValueError(f"REMOTE_WORKER_FAILED:launch:{detail}")
+        remote_pid = (worker_result.stdout or "").strip().splitlines()[-1].strip() if worker_result.stdout else ""
+
+        poll_seconds = float(target.get("resultPollSeconds") or target.get("result_poll_seconds") or 15)
+        max_wait = float(target.get("maxWaitSeconds") or target.get("max_wait_seconds") or 0)
+        waited = 0.0
+        while True:
+            probe = transport.run(
+                f"if [ -f {shlex.quote(remote_result_path)} ]; then echo READY; "
+                f"elif [ -n {shlex.quote(remote_pid)} ] && kill -0 {shlex.quote(remote_pid)} 2>/dev/null; then echo RUNNING; "
+                f"else echo DEAD; fi"
+            )
+            state = (probe.stdout or "").strip().splitlines()[-1].strip() if probe.stdout else ""
+            if state == "READY":
+                break
+            if state == "DEAD":
+                detail = (probe.stderr or "").strip()
+                raise ValueError(f"REMOTE_WORKER_FAILED:worker_exited_without_result:{detail or remote_pid}")
+            if max_wait and waited >= max_wait:
+                raise ValueError(f"REMOTE_WORKER_FAILED:timeout_waiting_result:{int(max_wait)}s")
+            time.sleep(poll_seconds)
+            waited += poll_seconds
 
         progress(80, "collecting")
         app._update_job_progress(job["id"], 80, "collecting")
@@ -167,9 +195,7 @@ def run_via_ssh(
             transport.fetch(remote_result_path, local_result)
         except ValueError as exc:
             detail = (worker_result.stderr or worker_result.stdout or str(exc)).strip()
-            if worker_result.exit_code != 0:
-                raise ValueError(f"REMOTE_WORKER_FAILED:{detail or worker_result.exit_code}") from exc
-            raise ValueError(f"REMOTE_WORKER_FAILED:result_missing:{exc}") from exc
+            raise ValueError(f"REMOTE_WORKER_FAILED:result_missing:{detail or exc}") from exc
 
         payload = json.loads(local_result.read_text(encoding="utf-8"))
         if str(payload.get("status") or "") != "succeeded":
@@ -187,12 +213,14 @@ def run_via_ssh(
         log_path.write_text(log_text, encoding="utf-8")
 
         collected: list[ArtifactSpec] = []
+        contract_by_path = {str(item.get("path") or "").strip(): item for item in artifacts if str(item.get("path") or "").strip()}
         declared = payload.get("artifacts") or artifacts
         for item in declared:
             relative = str(item.get("path") or "").strip()
             if not relative:
                 continue
-            required = bool(item.get("required", True))
+            contract = contract_by_path.get(relative) or {}
+            required = bool(item.get("required", contract.get("required", True)))
             local_artifact = local_work / relative
             remote_artifact = f"{remote_job_dir}/{relative}"
             try:
@@ -205,9 +233,11 @@ def run_via_ssh(
                 if required:
                     raise ValueError(f"REMOTE_ARTIFACT_MISSING:{relative}")
                 continue
-            target_path = str(item.get("target") or f"artifacts/{Path(relative).name}")
+            target_path = str(item.get("target") or contract.get("target") or f"artifacts/{Path(relative).name}")
             collected.append(ArtifactSpec(local_artifact, target_path))
-            if item.get("importResult") and item.get("kind") == "prediction_result":
+            kind = str(item.get("kind") or contract.get("kind") or "artifact")
+            import_result = bool(item.get("importResult", contract.get("importResult", False)))
+            if import_result and kind == "prediction_result":
                 dataset_ref = f"{version['datasetId']}@{version['version']}"
                 app.import_prediction_result(
                     job["experimentName"],
@@ -228,6 +258,16 @@ def run_via_ssh(
             if not local_artifact.exists():
                 raise ValueError(f"REMOTE_ARTIFACT_MISSING:{contract.path}")
             collected.append(ArtifactSpec(local_artifact, contract.target))
+            if contract.import_result and contract.kind == "prediction_result":
+                dataset_ref = f"{version['datasetId']}@{version['version']}"
+                app.import_prediction_result(
+                    job["experimentName"],
+                    job["templateId"],
+                    getattr(wrapper, "model_type", ""),
+                    local_artifact,
+                    created_by=job.get("owner") or "unknown",
+                    dataset_ref=dataset_ref,
+                )
 
         return ExecutionResult(metrics=metrics, model_payload=model_payload, artifacts=collected, log_text=log_text)
     finally:
