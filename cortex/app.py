@@ -21,7 +21,8 @@ from .executors.capability_loader import capability_repo_paths, load_capability_
 from .executors.provenance import executor_provenance_for, flatten_executor_provenance
 from .mlflow_local import LocalMlflow
 from .resource_guard import ResourceGuardError, cleanup_resource_guard, run_resource_guard
-from .runtime_targets import resolve_runtime_target
+from .runtime_targets import public_runtime_target, resolve_runtime_target
+from .ssh_runtime import run_via_ssh
 from .storage import ObjectStorage
 
 
@@ -799,7 +800,7 @@ class CortexApp:
             raise ValueError("DATASET_ARCHIVED")
         if dataset["type"] not in load(template["dataset_types"]):
             raise ValueError("TEMPLATE_DATASET_TYPE_MISMATCH")
-        resolved_runtime_target = resolve_runtime_target(runtime_target, params)
+        resolved_runtime_target = public_runtime_target(resolve_runtime_target(runtime_target, params))
         job_id = f"job_{uuid4().hex[:12]}"
         tags = {
             "platform.jobId": job_id,
@@ -840,9 +841,11 @@ class CortexApp:
     def _run_job(self, job_id: str) -> None:
         job = self.get_training_job(job_id)
         cortex_logging.info("training job started id=%s template=%s run=%s", job_id, job["templateId"], job["mlflowRunId"])
+        runtime_kind = str((job.get("runtimeTarget") or {}).get("kind") or "local")
+        initial_ref = f"ssh:{(job.get('runtimeTarget') or {}).get('id') or 'remote'}:pending" if runtime_kind == "ssh" else f"local:{os.getpid()}"
         self.conn.execute(
             "UPDATE training_jobs SET status = 'running', progress_percent = 5, status_message = ?, started_at = ?, executor_ref = ? WHERE id = ?",
-            ("Starting executor", now(), f"local:{os.getpid()}", job_id),
+            ("connecting" if runtime_kind == "ssh" else "Starting executor", now(), initial_ref, job_id),
         )
         self.conn.commit()
         log_path = Path(job["logUri"])
@@ -898,19 +901,32 @@ class CortexApp:
         self.conn.execute("UPDATE training_jobs SET executor_provenance = ? WHERE id = ?", (dump(provenance), job["id"]))
         self.mlflow.update_run(job["mlflowRunId"], tags=flatten_executor_provenance(provenance))
         work_dir = self.home / "jobs" / job["id"]
-        context = TrainingContext(
-            app=self,
-            job=job,
-            dataset=dataset,
-            version=version,
-            params=job["params"],
-            runtime_target=job["runtimeTarget"],
-            resource_guard=job.get("resourceGuard") or {},
-            work_dir=work_dir,
-            log_path=log_path,
-            progress=progress,
-        )
-        result = executor.run(context)
+        runtime_kind = str((job.get("runtimeTarget") or {}).get("kind") or "local")
+        if runtime_kind == "ssh":
+            # SSH targets are a real execution boundary: never call the local executor.
+            result = run_via_ssh(
+                app=self,
+                job=job,
+                dataset=dataset,
+                version=version,
+                log_path=log_path,
+                progress=progress,
+                executor=executor,
+            )
+        else:
+            context = TrainingContext(
+                app=self,
+                job=job,
+                dataset=dataset,
+                version=version,
+                params=job["params"],
+                runtime_target=job["runtimeTarget"],
+                resource_guard=job.get("resourceGuard") or {},
+                work_dir=work_dir,
+                log_path=log_path,
+                progress=progress,
+            )
+            result = executor.run(context)
         model_file = work_dir / "model.json"
         result.model_payload["executorProvenance"] = provenance
         result.model_payload["metrics"] = result.metrics

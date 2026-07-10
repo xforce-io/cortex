@@ -58,7 +58,9 @@ validation.
 - The dataset registration helper is
   `projects/guangyuan-multi-business-energy-forecast/cortex/register_dataset.py`.
 - Full mode must not default to local execution. It must receive an explicit
-  runtime target from the request or deployment configuration.
+  runtime target id that is configured on the Cortex controller.
+- When `kind=ssh`, execution happens on the remote worker only; local executor
+  runs must not be used to fake remote success.
 - Runtime target inventory, concrete host addresses, credentials, and private
   source data paths are operational configuration. They do not belong in this
   repository.
@@ -175,8 +177,8 @@ training reproduction.
 ## Full preflight
 
 Full training uses `guangyuan-lstm-trainer` with `run_mode=full`. It must
-receive an explicit runtime target from job metadata or deployment
-configuration. A missing target should fail before training with:
+receive an explicit runtime target id that is configured on the controller
+(`CORTEX_RUNTIME_TARGETS`). A missing target should fail before training with:
 
 ```text
 GUANGYUAN_RUNTIME_TARGET_REQUIRED
@@ -200,22 +202,89 @@ the job.
 ## Runtime target and resource guard
 
 `runtimeTarget` is job metadata, not the executor ID. Cortex has one built-in
-target, `local`. Any remote target must be supplied by the caller or deployment
-configuration.
+target, `local`. Any remote target must be supplied by controller configuration.
 
-Example target shape:
+### SSH full job (platform dispatch)
+
+When `runtimeTarget.kind=ssh`, Cortex treats the target as a **real execution
+boundary**. The controller does not call the local executor. It opens an SSH
+session, runs a one-shot remote worker, and collects structured results.
+
+Controller configuration (never commit real values):
+
+```bash
+export CORTEX_RUNTIME_TARGETS=/path/to/.runtime-targets.json
+# or inline JSON; prefer a gitignored file outside the repo
+```
+
+Example controller inventory shape (placeholders only):
 
 ```json
 {
-  "id": "remote-training",
-  "kind": "ssh",
-  "host": "<managed-by-deployment>",
-  "capabilities": ["gpu"]
+  "remote-training": {
+    "kind": "ssh",
+    "host": "<managed-by-deployment>",
+    "user": "<managed-by-deployment>",
+    "identityFile": "<managed-by-deployment>",
+    "workDirRoot": "<remote-work-root>",
+    "capabilityRoot": "<capability-root>",
+    "pythonExecutable": "python3",
+    "capabilities": ["gpu"]
+  }
 }
 ```
 
-Do not commit the real runtime target inventory in source code, tests, or this
-runbook.
+Submit with the target **id** only. Host, user, and key are controller-owned and
+cannot be overridden from the API or job params:
+
+```bash
+export CORTEX_HOME=/path/to/cortex-home
+export CORTEX_CAPABILITY_REPOS=/path/to/ai-capability
+export CORTEX_RUNTIME_TARGETS=/path/to/.runtime-targets.json
+
+python -m cortex.cli train submit \
+  --template guangyuan-lstm-trainer \
+  --dataset guangyuan-energy-business-hourly@v2026-07-08 \
+  --experiment guangyuan-lstm/full \
+  --runtime-target remote-training \
+  --param run_mode=full \
+  --param source_csv=<remote-data-root>/prepared/db_full_business.csv \
+  --param tree_names=普通照明 \
+  --param tree_vector_mode=none \
+  --owner operator \
+  --team ml \
+  --wait
+```
+
+Stage progress for SSH jobs:
+
+```text
+connecting → preflight → running → collecting
+```
+
+Platform error codes (distinct from `GUANGYUAN_*` business codes):
+
+```text
+RUNTIME_TARGET_NOT_CONFIGURED
+RUNTIME_TARGET_UNREACHABLE
+REMOTE_CAPABILITY_REVISION_MISMATCH
+REMOTE_WORKER_FAILED
+REMOTE_ARTIFACT_MISSING
+```
+
+On any of these failures the job is `failed` and the controller must not record
+a successful local training product as a substitute for remote work.
+
+Remote environment preparation (data layout, capability checkout lock, training
+dependencies) is owned by ai-capability:
+
+- `projects/guangyuan-multi-business-energy-forecast/docs/remote-full-training.md`
+- `projects/guangyuan-multi-business-energy-forecast/cortex/check_remote_prep.py`
+
+Concrete host addresses, credentials, and private data paths stay in the
+external deployment inventory. Do not commit them in source code, tests, or this
+runbook. True GPU single-business acceptance remains outside this issue and is
+tracked by ai-capability#12 after cortex#21 is available.
 
 Long-running jobs can declare a resource guard in params:
 

@@ -156,12 +156,16 @@ collection, experiment result import, and compare output.
 The Guangyuan reproduction operating runbook is
 [`docs/runbooks/14-guangyuan-reproduction.md`](docs/runbooks/14-guangyuan-reproduction.md).
 
-Training jobs record a `runtimeTarget`. The only built-in target is `local`;
-remote targets must be supplied by the caller or deployment configuration through
-job metadata, for example `{"id": "remote-training", "kind": "ssh", "host": "<managed-by-deployment>"}`.
-The target is exposed to external preflight hooks through `context.runtime_target`
-so capabilities can distinguish local smoke runs from remote full-training targets
-without splitting one executor into local and remote variants.
+Training jobs record a `runtimeTarget`. The only built-in target is `local`.
+SSH targets are configured on the controller via `CORTEX_RUNTIME_TARGETS`
+(JSON or a gitignored file path). Submit jobs with the target id only; host,
+user, and key are controller-owned and cannot be overridden from the API.
+When `kind=ssh`, Cortex dispatches a one-shot remote worker over SSH
+(`connecting` → `preflight` → `running` → `collecting`) and does not call the
+local executor. Platform error codes include `RUNTIME_TARGET_NOT_CONFIGURED`,
+`RUNTIME_TARGET_UNREACHABLE`, `REMOTE_CAPABILITY_REVISION_MISMATCH`,
+`REMOTE_WORKER_FAILED`, and `REMOTE_ARTIFACT_MISSING`. See the Guangyuan
+runbook SSH section for the operating path.
 
 Long-running jobs can declare a `resource_guard` in params. Cortex checks local
 disk space before running the executor, constrains guard-managed temp directories
