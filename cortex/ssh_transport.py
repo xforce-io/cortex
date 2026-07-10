@@ -158,6 +158,14 @@ class FakeSshTransport:
         if "cortex.remote_worker" in command or "remote_worker" in command:
             return self._handle_worker(command)
 
+        # Poll loop from ssh_runtime after nohup launch.
+        if "result.json" in command and ("READY" in command or "RUNNING" in command or "DEAD" in command):
+            work_dir = self._extract_work_dir_from_result_probe(command)
+            result_path = f"{work_dir}/result.json" if work_dir else ""
+            if result_path and result_path in self.remote_files:
+                return SshCommandResult(0, "READY\n", "")
+            return SshCommandResult(0, "RUNNING\n", "")
+
         return SshCommandResult(0, "", "")
 
     def put(self, local_path: Path, remote_path: str) -> None:
@@ -205,9 +213,19 @@ class FakeSshTransport:
             self.remote_files[f"{work_dir}/{relative}"] = bytes(data)
             self.remote_files[relative] = bytes(data)
         if status != "succeeded":
-            # Worker process non-zero exit is optional; controller primarily reads result.json.
-            return SshCommandResult(1, "", str(payload.get("error") or "REMOTE_WORKER_FAILED"))
-        return SshCommandResult(0, "remote worker ok\n", "")
+            # Launch still returns a pid; failure is encoded in result.json for the poller.
+            return SshCommandResult(0, "4242\n", str(payload.get("error") or ""))
+        return SshCommandResult(0, "4242\n", "")
+
+    def _extract_work_dir_from_result_probe(self, command: str) -> str:
+        # Command contains: if [ -f <work>/result.json ]; then echo READY; ...
+        marker = "/result.json"
+        if marker not in command:
+            return ""
+        before = command.split(marker, 1)[0]
+        # take last path-looking token
+        token = before.strip().split()[-1].strip("'\"")
+        return token.rstrip("/")
 
     def _extract_work_dir(self, command: str) -> str:
         # Expect: ... --work-dir <dir> or request path under work dir.
