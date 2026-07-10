@@ -534,7 +534,7 @@ from cortex.executors import ExecutionResult
 
 class Preflight:
     def run(self, context):
-        if context.runtime_target["id"] != "remote-gpu":
+        if context.runtime_target["id"] != "local":
             raise ValueError("TEST_RUNTIME_TARGET_NOT_PROPAGATED")
         context.params["target_kind"] = context.runtime_target["kind"]
 
@@ -573,6 +573,8 @@ class Executor:
                 dataset = app.create_dataset("runtime-target", "tabular", "alice", "ml")
                 version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/runtime-target/v1/train.csv", "csv", created_by="alice")
 
+                # Local path: runtime target metadata is visible to external preflight.
+                # SSH targets are a real execution boundary and covered by tests/test_ssh_runtime.py.
                 job = app.submit_training_job(
                     "runtime-target-executor",
                     f"{dataset['id']}@{version['version']}",
@@ -581,20 +583,41 @@ class Executor:
                     "alice",
                     "ml",
                     wait=True,
-                    runtime_target={"id": "remote-gpu", "kind": "ssh", "host": "runtime.example.internal", "capabilities": ["gpu"]},
+                    runtime_target="local",
                 )
                 model_payload = json.loads((app.home / "mlruns" / job["mlflowRunId"] / "model" / "model.json").read_text(encoding="utf-8"))
 
                 self.assertEqual(job["status"], "succeeded")
-                self.assertEqual(job["runtimeTarget"]["id"], "remote-gpu")
-                self.assertEqual(job["runtimeTarget"]["kind"], "ssh")
-                self.assertEqual(job["runtimeTarget"]["host"], "runtime.example.internal")
+                self.assertEqual(job["runtimeTarget"]["id"], "local")
+                self.assertEqual(job["runtimeTarget"]["kind"], "local")
                 self.assertTrue(job["runtimeTarget"]["explicit"])
-                self.assertIn("gpu", job["runtimeTarget"]["capabilities"])
-                self.assertEqual(model_payload["targetKind"], "ssh")
+                self.assertEqual(model_payload["targetKind"], "local")
                 run = app.get_run(job["mlflowRunId"])
-                self.assertEqual(run["tags"]["runtime_target"], "remote-gpu")
-                self.assertEqual(run["tags"]["runtime_target_kind"], "ssh")
+                self.assertEqual(run["tags"]["runtime_target"], "local")
+                self.assertEqual(run["tags"]["runtime_target_kind"], "local")
+            finally:
+                app.conn.close()
+
+    def test_ssh_runtime_target_requires_controller_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = CortexApp.open(Path(tmp))
+            try:
+                source = Path(tmp) / "train.csv"
+                source.write_text("x,y\n1,2\n", encoding="utf-8")
+                app.storage.put_file("s3://datasets/runtime-ssh-required/v1/train.csv", source)
+                dataset = app.create_dataset("runtime-ssh-required", "tabular", "alice", "ml")
+                version = app.add_dataset_version(dataset["id"], "v1", "s3://datasets/runtime-ssh-required/v1/train.csv", "csv", created_by="alice")
+
+                with self.assertRaisesRegex(ValueError, "RUNTIME_TARGET_NOT_CONFIGURED:remote-gpu"):
+                    app.create_training_job(
+                        "sklearn-kmeans",
+                        f"{dataset['id']}@{version['version']}",
+                        "demo/runtime-ssh-required",
+                        {},
+                        "alice",
+                        "ml",
+                        runtime_target={"id": "remote-gpu", "kind": "ssh", "host": "runtime.example.internal", "capabilities": ["gpu"]},
+                    )
             finally:
                 app.conn.close()
 

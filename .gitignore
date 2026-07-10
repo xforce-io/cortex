@@ -12,6 +12,8 @@ venv/
 .DS_Store
 .cortex/
 .cortex-project-ui/
+.runtime-targets.json
+.cortex-runtime-targets.json
 exps/
 
 dist/
