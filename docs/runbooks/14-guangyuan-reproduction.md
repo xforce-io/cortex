@@ -9,17 +9,22 @@ The source of this runbook is `docs/runbooks/14-guangyuan-reproduction.md`.
 
 ## Purpose and scope
 
-Use this runbook to verify four different paths:
+Use this runbook to verify these paths:
 
 - external historical result import into Cortex
 - small Cortex-managed smoke reproduction
 - full-training preflight failure or readiness
 - resource guard visibility before long-running jobs
+- SSH full-job dispatch (`kind=ssh`) against a deployment inventory
 
-The runbook does not claim that full 19-business training has already been
-rerun. Full training requires an explicit runtime target, prepared data, the
-Guangyuan training dependencies, and an operator-owned deployment inventory
-outside this repository.
+Single-business remote full training (普通照明) has been accepted on a managed
+GPU runtime. Evidence lives in ai-capability:
+`projects/guangyuan-multi-business-energy-forecast/experiments/exp-2026-07-10-ordinary-lighting-remote/verification.md`.
+
+This runbook still does **not** claim that full multi-business (14/19) training
+or five-method ranking has been rerun end-to-end. Those need multi-business
+prepared CSV, longer GPU wall time, and multi-method export — not only SSH
+dispatch.
 
 ## Repositories and prerequisites
 
@@ -208,7 +213,9 @@ target, `local`. Any remote target must be supplied by controller configuration.
 
 When `runtimeTarget.kind=ssh`, Cortex treats the target as a **real execution
 boundary**. The controller does not call the local executor. It opens an SSH
-session, runs a one-shot remote worker, and collects structured results.
+session, launches a remote worker under `nohup`, polls for `result.json`, and
+collects structured results. Worker stdio is redirected to the remote job log so
+long training is not tied to a single interactive SSH pipe.
 
 Controller configuration (never commit real values):
 
@@ -283,8 +290,12 @@ dependencies) is owned by ai-capability:
 
 Concrete host addresses, credentials, and private data paths stay in the
 external deployment inventory. Do not commit them in source code, tests, or this
-runbook. True GPU single-business acceptance remains outside this issue and is
-tracked by ai-capability#12 after cortex#21 is available.
+runbook.
+
+Single-business GPU acceptance (普通照明, combined-finetune publish) is recorded
+in ai-capability
+`experiments/exp-2026-07-10-ordinary-lighting-remote/verification.md`. Multi-business
+full retraining and five-method compare remain follow-up work.
 
 Long-running jobs can declare a resource guard in params:
 

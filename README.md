@@ -160,9 +160,11 @@ Training jobs record a `runtimeTarget`. The only built-in target is `local`.
 SSH targets are configured on the controller via `CORTEX_RUNTIME_TARGETS`
 (JSON or a gitignored file path). Submit jobs with the target id only; host,
 user, and key are controller-owned and cannot be overridden from the API.
-When `kind=ssh`, Cortex dispatches a one-shot remote worker over SSH
+When `kind=ssh`, Cortex dispatches a remote worker over SSH
 (`connecting` → `preflight` → `running` → `collecting`) and does not call the
-local executor. Platform error codes include `RUNTIME_TARGET_NOT_CONFIGURED`,
+local executor. The worker is started with `nohup` and the controller polls for
+`result.json`, so long GPU jobs are not bound to one interactive SSH exec pipe.
+Platform error codes include `RUNTIME_TARGET_NOT_CONFIGURED`,
 `RUNTIME_TARGET_UNREACHABLE`, `REMOTE_CAPABILITY_REVISION_MISMATCH`,
 `REMOTE_WORKER_FAILED`, and `REMOTE_ARTIFACT_MISSING`. See the Guangyuan
 runbook SSH section for the operating path.
