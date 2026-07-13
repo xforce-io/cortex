@@ -1634,6 +1634,8 @@ class CortexApp:
             raise ValueError("MODEL_VERSION_NOT_FOUND")
         test_version = self.parse_dataset_ref(test_dataset_ref)
         test_dataset = self.get_dataset(test_version["datasetId"])
+        if test_dataset["status"] == "archived":
+            raise ValueError("DATASET_ARCHIVED")
         if test_dataset["type"] != "eval_set":
             raise ValueError("TEST_DATASET_REQUIRED")
         model_path = self.home / "mlruns" / model["run_id"] / model["artifact_path"] / "model.json"
